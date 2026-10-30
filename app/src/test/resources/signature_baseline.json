@@ -1,0 +1,13 @@
+{
+  "onelap": "4a77bd6e4ce24a86f91b08d8ad308078",
+  "onelap_nonce": "ABCDEFGHIJKLMNOP",
+  "onelap_timestamp": "1700000000",
+  "onelap_page": "1",
+  "onelap_limit": "20",
+  "onelap_query": "limit=20&nonce=ABCDEFGHIJKLMNOP&page=1&timestamp=1700000000",
+  "igp": "e3xdnFsGilGCTUHmagmiqZRM+YmrrDMadcRlvIhQ9SY=",
+  "igp_body": "{\"pageNo\":1,\"pageSize\":20}",
+  "igp_path": "/web-gateway/web-analyze/activity/queryMyActivity?pageNo=1&pageSize=20&sort=1&reqType=0",
+  "igp_ts": "1700000000",
+  "igp_nonce": "11111111-2222-3333-4444-555555555555"
+}
