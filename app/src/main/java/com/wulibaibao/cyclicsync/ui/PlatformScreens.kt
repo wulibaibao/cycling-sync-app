@@ -556,7 +556,9 @@ fun PlatformConfigScreen(
     state: PlatformState,
     onBack: () -> Unit,
     onSendSms: (String) -> Unit,
-    onVerifyCode: (String) -> Unit,
+    /** (手机号, 验证码) —— 手机号必须一起回传：它只存在于界面本地状态，
+     *  没有写进已保存的 account，Activity 侧拿不到就无法校验和登录。 */
+    onVerifyCode: (String, String) -> Unit,
     onLogin: (String, String) -> Unit,
     onPasswordLogin: (String, String) -> Unit,
     onLoggedOut: (Platform) -> Unit,
@@ -693,7 +695,7 @@ fun PlatformConfigScreen(
                                         modifier = Modifier.weight(1f),
                                     )
                                     FilledTonalButton(
-                                        onClick = { onVerifyCode(igpCode) },
+                                        onClick = { onVerifyCode(igpPhone, igpCode) },
                                         shape = RoundedCornerShape(16.dp),
                                         modifier = Modifier.weight(1f),
                                     ) { Text("登录") }
@@ -761,7 +763,7 @@ fun PlatformConfigScreen(
                                         modifier = Modifier.weight(1f),
                                     )
                                     FilledTonalButton(
-                                        onClick = { onVerifyCode(xzCode) },
+                                        onClick = { onVerifyCode(xzMobile, xzCode) },
                                         shape = RoundedCornerShape(16.dp),
                                         modifier = Modifier.weight(1f),
                                     ) { Text("登录") }

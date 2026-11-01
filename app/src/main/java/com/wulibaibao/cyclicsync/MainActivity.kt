@@ -175,9 +175,9 @@ class MainActivity : ComponentActivity() {
                                         requestIgpSms(phone)
                                     }
                                 },
-                                onVerifyCode = { code ->
+                                onVerifyCode = { phone, code ->
                                     if (s.platform == Platform.XINGZHE) {
-                                        verifyXingzheCode(code, account) { updated ->
+                                        verifyXingzheCode(phone, code, account) { updated ->
                                             persist(updated)
                                             states = states.with(
                                                 Platform.XINGZHE,
@@ -191,7 +191,7 @@ class MainActivity : ComponentActivity() {
                                             )
                                         }
                                     } else {
-                                        verifyIgpCode(code, account) { updated ->
+                                        verifyIgpCode(phone, code, account) { updated ->
                                             persist(updated)
                                             states = states.with(
                                                 Platform.IGP,
@@ -572,17 +572,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun verifyXingzheCode(code: String, account: PlatformAccount, onDone: (PlatformAccount) -> Unit) {
-        if (account.xingzheMobile.isBlank() || code.isBlank()) {
+    private fun verifyXingzheCode(mobile: String, code: String, account: PlatformAccount, onDone: (PlatformAccount) -> Unit) {
+        if (mobile.isBlank() || code.isBlank()) {
             Toast.makeText(this, "手机号和验证码都要填", Toast.LENGTH_SHORT).show()
             return
         }
         lifecycleScope.launch {
             val client = XingzheClient()
-            client.loginBySms(account.xingzheMobile, code)
+            client.loginBySms(mobile, code)
                 .onSuccess {
                     onDone(
                         account.copy(
+                            xingzheMobile = mobile,
                             xingzheSessionId = client.sessionId,
                             xingzheUsername = client.username,
                             xingzheUserId = client.userId,
@@ -647,17 +648,18 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    private fun verifyIgpCode(code: String, account: PlatformAccount, onDone: (PlatformAccount) -> Unit) {
-        if (account.igpPhone.isBlank() || code.isBlank()) {
+    private fun verifyIgpCode(phone: String, code: String, account: PlatformAccount, onDone: (PlatformAccount) -> Unit) {
+        if (phone.isBlank() || code.isBlank()) {
             Toast.makeText(this, "手机号和验证码都要填", Toast.LENGTH_SHORT).show()
             return
         }
         lifecycleScope.launch {
             val client = IgpClient()
-            client.loginBySms(account.igpPhone, code)
+            client.loginBySms(phone, code)
                 .onSuccess {
                     onDone(
                         account.copy(
+                            igpPhone = phone,
                             igpToken = client.token,
                             igpRefreshToken = client.refreshToken,
                             igpExpiresAt = client.expiresAt,
