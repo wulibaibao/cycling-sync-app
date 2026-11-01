@@ -1,0 +1,6 @@
+# Gradle wrapper 的 gradlew 是 Unix shell 脚本，必须保持 LF，
+# 否则在 Linux/macOS 上执行会报 "bad interpreter: /bin/sh^M"
+gradlew text eol=lf
+
+# Windows 批处理保持 CRLF
+*.bat text eol=crlf

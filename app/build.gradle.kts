@@ -127,6 +127,9 @@ dependencies {
     implementation("androidx.compose.ui:ui:1.7.6")
     implementation("androidx.compose.material3:material3:1.4.0")
     implementation("androidx.compose.material:material-icons-extended:1.7.6")
+    // debug-only：@Preview 注解 + 离线渲染（android preview render），不进 release 包
+    debugImplementation("androidx.compose.ui:ui-tooling-preview:1.7.6")
+    debugImplementation("androidx.compose.ui:ui-tooling:1.7.6")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
