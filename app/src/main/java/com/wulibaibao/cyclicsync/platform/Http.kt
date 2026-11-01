@@ -165,6 +165,9 @@ internal object Http {
                 readTimeout = timeoutMs
                 setRequestProperty("User-Agent", UA)
                 headers.forEach { (k, v) -> setRequestProperty(k, v) }
+                // ⚠️ Content-Type 必须**最后**设 —— setRequestProperty 是后设覆盖先设。
+                // 如果调用方传了 application/json，boundary 会被抹掉，
+                // 服务端回 415 Unsupported media type，文件根本没传上去。
                 setRequestProperty("Content-Type", "multipart/form-data; boundary=$boundary")
                 doOutput = true
                 setFixedLengthStreamingMode(out.size())

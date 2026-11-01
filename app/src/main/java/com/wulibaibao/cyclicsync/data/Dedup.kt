@@ -38,21 +38,25 @@ internal class DedupIndex {
             trimmed.toLongOrNull()?.let { n ->
                 return if (n > 1_000_000_000_000L) n else n * 1000L
             }
+            // IGPSPORT 用点号分隔日期（"2026.10.31"），先归一化成横杠
+            val normalized = trimmed.replace('/', '.').replace('.', '-')
             val patterns = listOf(
                 "yyyy-MM-dd HH:mm:ss",
                 "yyyy-MM-dd'T'HH:mm:ss",
                 "yyyy-MM-dd'T'HH:mm:ss.SSS",
                 "yyyy-MM-dd'T'HH:mm:ss'Z'",
-                "yyyy/MM/dd HH:mm:ss",
                 "yyyy-MM-dd",
             )
             for (p in patterns) {
-                try {
-                    val fmt = SimpleDateFormat(p, Locale.US)
-                    fmt.timeZone = if (p.endsWith("'Z'")) TimeZone.getTimeZone("UTC") else TZ
-                    return fmt.parse(trimmed)?.time
-                } catch (e: Exception) {
-                    // 试下一个
+                for (candidate in listOf(trimmed, normalized)) {
+                    try {
+                        val fmt = SimpleDateFormat(p, Locale.US)
+                        fmt.isLenient = false
+                        fmt.timeZone = if (p.endsWith("'Z'")) TimeZone.getTimeZone("UTC") else TZ
+                        return fmt.parse(candidate)?.time
+                    } catch (e: Exception) {
+                        // 试下一个
+                    }
                 }
             }
             return null
@@ -83,6 +87,37 @@ internal class DedupIndex {
         val tol = maxOf(DIST_TOL_MIN, distanceM * DIST_TOL_RATIO)
         return prints.any {
             kotlin.math.abs(it.startMs - startMs) <= TIME_TOL_MS &&
+                kotlin.math.abs(it.distanceM - distanceM) <= tol
+        }
+    }
+
+    /**
+     * 同日 + 距离命中 —— 用于**时间精度不足**的源。
+     *
+     * IGPSPORT 的 startTime 只有日期（"2026.10.31"），解析出来是当天 00:00:00；
+     * 而目标平台的记录带真实时刻（06:00:38、07:02:49…）。
+     * 两者差好几个小时，±15 秒的指纹永远匹配不上 → 每次同步都当新记录重复上传。
+     *
+     * 所以当源平台只有日期时，退化成「同一天 + 距离在容差内」就算命中。
+     */
+    fun matchesSameDay(
+        dayMs: Long?,
+        distanceM: Double,
+        tz: java.util.TimeZone = TimeZone.getTimeZone("Asia/Shanghai"),
+    ): Boolean {
+        if (dayMs == null) return false
+        val tol = maxOf(DIST_TOL_MIN, distanceM * DIST_TOL_RATIO)
+        val cal = java.util.Calendar.getInstance(tz)
+        cal.timeInMillis = dayMs
+        val y = cal.get(java.util.Calendar.YEAR)
+        val m = cal.get(java.util.Calendar.MONTH)
+        val d = cal.get(java.util.Calendar.DAY_OF_MONTH)
+        return prints.any {
+            val c = java.util.Calendar.getInstance(tz)
+            c.timeInMillis = it.startMs
+            c.get(java.util.Calendar.YEAR) == y &&
+                c.get(java.util.Calendar.MONTH) == m &&
+                c.get(java.util.Calendar.DAY_OF_MONTH) == d &&
                 kotlin.math.abs(it.distanceM - distanceM) <= tol
         }
     }

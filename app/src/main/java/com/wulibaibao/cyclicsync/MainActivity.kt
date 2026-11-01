@@ -25,6 +25,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import com.wulibaibao.cyclicsync.data.CredentialStore
+import com.wulibaibao.cyclicsync.data.LogStore
 import com.wulibaibao.cyclicsync.data.UiPrefs
 import com.wulibaibao.cyclicsync.data.PlatformAccount
 import com.wulibaibao.cyclicsync.data.SyncDirection
@@ -57,6 +58,9 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var store: CredentialStore
 
+    /** 同步日志持久化 —— 否则 App 被杀掉后日志就没了 */
+    private lateinit var logStore: LogStore
+
     /** 各平台独立状态 —— 放在 Activity 层，普通方法（登录回调等）也要访问 */
     var states by mutableStateOf(PlatformStates())
 
@@ -85,6 +89,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = CredentialStore(this)
+        logStore = LogStore(this)
         uiPrefs = UiPrefs(this)
 
         setContent {
@@ -96,26 +101,49 @@ class MainActivity : ComponentActivity() {
     var account by remember { mutableStateOf(PlatformAccount()) }
     var credsLoaded by remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
-        val loaded = withContext(Dispatchers.IO) { store.load() }
-        account = loaded
-        // 从已保存的凭据恢复各平台登录态 —— 否则重装/重启后
-        // 凭据还在但界面显示「未配置」，用户以为要重新配。
-        states = restoreStates(loaded)
+        // ⚠️ 整个包 try/catch —— 协程里的未捕获异常会传播到主线程
+        // 直接杀掉进程（用户看到的是「一打开就闪退」）。
+        try {
+            val loaded = withContext(Dispatchers.IO) { store.load() }
+            account = loaded
+            // 从已保存的凭据恢复各平台登录态 —— 否则重装/重启后
+            // 凭据还在但界面显示「未配置」，用户以为要重新配。
+            states = restoreStates(loaded)
+        } catch (e: Exception) {
+            android.util.Log.e("CyclingSync", "load creds failed", e)
+        }
         credsLoaded = true
     }
                 var running by remember { mutableStateOf(false) }
                 var job by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
                 val events = remember { mutableStateListOf<SyncEvent>() }
-                // 同步方向 —— 从本地偏好恢复，重装后不用重新勾选
-                var selected by remember {
-                    mutableStateOf(setOf(SyncDirection.IGP_TO_XINGZHE, SyncDirection.ONELAP_TO_XINGZHE))
+                // 恢复上次的日志 —— 否则 App 被杀掉后日志就没了
+                LaunchedEffect(Unit) {
+                    try {
+                        val saved = withContext(Dispatchers.IO) { logStore.load() }
+                        if (saved.isNotEmpty()) {
+                            events.clear()
+                            events.addAll(saved)
+                        }
+                    } catch (e: Exception) {
+                        android.util.Log.e("CyclingSync", "load log failed", e)
+                    }
                 }
+                // 同步方向 —— 默认**一个都不选**，用户自己勾。
+                // （之前默认选中「IGP→行者」和「OneLap→行者」两条，
+                //   首次打开就带着方向，容易误同步。）
+                // 用户勾过之后会存到本地偏好，下次打开自动恢复。
+                var selected by remember { mutableStateOf(emptySet<SyncDirection>()) }
                 var prefsLoaded by remember { mutableStateOf(false) }
                 LaunchedEffect(Unit) {
-                    val saved = withContext(Dispatchers.IO) { uiPrefs.loadDirections() }
-                        .mapNotNull { n -> runCatching { SyncDirection.valueOf(n) }.getOrNull() }
-                        .toSet()
-                    if (saved.isNotEmpty()) selected = saved
+                    try {
+                        val saved = withContext(Dispatchers.IO) { uiPrefs.loadDirections() }
+                            .mapNotNull { n -> runCatching { SyncDirection.valueOf(n) }.getOrNull() }
+                            .toSet()
+                        if (saved.isNotEmpty()) selected = saved
+                    } catch (e: Exception) {
+                        android.util.Log.e("CyclingSync", "load prefs failed", e)
+                    }
                     prefsLoaded = true
                 }
                 // 同步日期，默认当天
@@ -267,8 +295,12 @@ class MainActivity : ComponentActivity() {
 
                             is Screen.Logs -> LogsScreen(
                     events = events.toList(),
+                    running = running,
                     onBack = { screen = Screen.Sync },
-                    onClear = { events.clear() },
+                    onClear = {
+                        events.clear()
+                        logStore.clearSync()
+                    },
                 )
 
                 is Screen.Sync -> SyncScreen(
@@ -284,14 +316,30 @@ class MainActivity : ComponentActivity() {
                                     }
                                 },
                                 onSync = {
+                                    // 新一轮同步：清空内存 + 磁盘上的旧日志。
+                                    // 必须同步清（clearSync）—— 异步 clear() 可能
+                                    // 在同步刚写入日志之后才执行，把新日志误删。
                                     events.clear()
+                                    logStore.clearSync()
                                     running = true
                                     val target = syncDate
                                     job = lifecycleScope.launch {
-                                        SyncEngine(account, this@MainActivity)
-                                            .sync(selected.toList(), target)
-                                            .collect { ev -> events.add(ev) }
-                                        running = false
+                                        // 收集本次同步的事件 —— 结束后一次性落盘。
+                                        // （每条事件都 append 一次：每次开 IO 协程
+                                        //   + 全量重写文件，O(n²)，界面会被卡死。）
+                                        val batch = mutableListOf<SyncEvent>()
+                                        try {
+                                            SyncEngine(account, this@MainActivity)
+                                                .sync(selected.toList(), target)
+                                                .collect { ev ->
+                                                    events.add(ev)
+                                                    batch += ev
+                                                }
+                                        } finally {
+                                            // 中途取消/异常也要把已产生的日志留下来
+                                            withContext(Dispatchers.IO) { logStore.appendAll(batch) }
+                                            running = false
+                                        }
                                     }
                                 },
                                 onStop = {

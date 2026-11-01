@@ -44,15 +44,15 @@ val generateKeysTask = tasks.register("generatePlatformKeys") {
 }
 
 android {
-    namespace = "com.wulibaibao.cyclingsync"
+    namespace = "com.wulibaibao.cyclicsync"
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.wulibaibao.cyclingsync"
+        applicationId = "com.wulibaibao.cyclicsync"
         minSdk = 24
         targetSdk = 35
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "1.1.0"
         resourceConfigurations += listOf("zh", "en")
 
     }
@@ -66,13 +66,39 @@ android {
                 storePassword = localProps.getProperty("release.keystore.storePassword")
                 keyAlias = localProps.getProperty("release.keystore.keyAlias")
                 keyPassword = localProps.getProperty("release.keystore.keyPassword")
+                // v1+v2+v3 全开 —— 部分国产 ROM 的安装器只认 v1 (JAR 签名)
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
             }
         }
     }
 
     buildTypes {
+        debug {
+            // ⚠️ debug 也压缩 —— 未压缩的 dex 有 40MB+（material-icons-extended 占大头），
+            // 部分国产 ROM 的 dex 加载器扛不住，表现为「一启动就崩」。
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+            // ⚠️ debug 用**正式签名** —— 否则和 release 签名不同，
+            // 互相覆盖安装会失败（系统报「应用未安装」，容易被误判成「闪退」）。
+            signingConfig = if (localProps.getProperty("release.keystore.path") != null &&
+                file(localProps.getProperty("release.keystore.path")).exists()
+            ) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
+        }
         release {
-            isMinifyEnabled = false
+            // ⚠️ 开启 R8 —— 不压缩时 dex 有 40MB+（material-icons-extended 占大头），
+            // 部分国产 ROM 的 dex 加载器扛不住，表现为「一启动就崩」。
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             // 配了正式签名就用正式的，否则退回 debug（保证本地能构建）
             signingConfig = if (localProps.getProperty("release.keystore.path") != null &&
                 file(localProps.getProperty("release.keystore.path")).exists()
@@ -82,6 +108,9 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+        // ⚠️ minSdk 24 但代码用了 java.time（LocalDate 等）——
+        // 不开 desugaring 的话在这些设备上直接 NoClassDefFoundError。
+        isCoreLibraryDesugaringEnabled = true
     }
     kotlinOptions {
         jvmTarget = "17"
@@ -120,6 +149,7 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach 
 }
 
 dependencies {
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")

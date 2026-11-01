@@ -859,9 +859,17 @@ fun SyncScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
             .padding(horizontal = 20.dp),
     ) {
+        // ── 可滚动内容区 ──────────────────────────────────────
+        // 之前整个页面 verticalScroll，按钮跟着内容走 →
+        // 内容少时按钮浮在中间，下方一大片空白。
+        // 现在：内容区自己滚（weight 1f），按钮固定在底部吸底。
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState()),
+        ) {
         Spacer(Modifier.height(20.dp))
         // 标题行 —— 右侧放日志入口图标（固定在顶部，不会被同步日志挤下去）
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -926,24 +934,31 @@ fun SyncScreen(
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    Spacer(Modifier.height(2.dp))
+                    // 日期和星期拆成两块 —— 挤在一行时「周日」会被拆行
+                    // （今天 · 11月1日 周日 → 「周」在行尾、「日」单独掉到下一行）。
                     Text(
                         dateText(date),
                         style = MaterialTheme.typography.titleLarge,
                         fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        softWrap = false,
                     )
                 }
-                Text(
-                    "选择",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Spacer(Modifier.width(4.dp))
-                Icon(
-                    Icons.Rounded.KeyboardArrowRight,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.primary,
-                )
+                // 「选择 ›」垂直居中，和日期行对齐
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "选择",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Icon(
+                        Icons.Rounded.KeyboardArrowRight,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
         }
 
@@ -1021,8 +1036,10 @@ fun SyncScreen(
             }
         }
 
-        Spacer(Modifier.height(2.dp))
+        }   // ← 可滚动内容区结束
 
+        // ── 底部固定操作区 ────────────────────────────────────
+        Spacer(Modifier.height(10.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(
                 onClick = onSync,
@@ -1141,9 +1158,26 @@ private fun SmsCountdownButton(
 @Composable
 fun LogsScreen(
     events: List<SyncEvent>,
+    running: Boolean,
     onBack: () -> Unit,
     onClear: () -> Unit,
 ) {
+    // 「本次」= 本次同步产生的（最后一个 Done 之后）；「全部」= 所有历史
+    var showAll by remember { mutableStateOf(false) }
+    val lastDoneIdx = events.indexOfLast { it is SyncEvent.Done }
+    // 同步进行中：最后一个 Done 属于上一次同步，切分不成立 → 显示全部
+    //
+    // ⚠️ 这里必须用 drop 而不是 subList ——
+    // events 是 Compose 的 SnapshotStateList，它的 subList() 返回的是
+    // 快照视图，在重组时可能抛 ConcurrentModificationException /
+    // IndexOutOfBoundsException（App 一进日志页就崩）。
+    // drop 返回独立的 List，安全。
+    val visible: List<SyncEvent> = if (showAll || running || lastDoneIdx < 0) {
+        events.toList()
+    } else {
+        events.drop(lastDoneIdx + 1)
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1166,7 +1200,8 @@ fun LogsScreen(
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    "共 ${events.size} 条",
+                    if (showAll || lastDoneIdx < 0) "共 ${events.size} 条"
+                    else "本次 ${visible.size} 条 · 历史 ${events.size - visible.size} 条",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -1176,7 +1211,7 @@ fun LogsScreen(
                 // 复制全部 —— 一键把整份日志带走
                 IconButton(
                     onClick = {
-                        ctx.setText(AnnotatedString(events.joinToString("\n") { it.toPlainText() }))
+                        ctx.setText(AnnotatedString(visible.joinToString("\n") { it.toPlainText() }))
                     },
                     modifier = Modifier.size(36.dp),
                 ) {
@@ -1200,7 +1235,34 @@ fun LogsScreen(
 
         Spacer(Modifier.height(10.dp))
 
-        if (events.isEmpty()) {
+        // 本次 / 全部 切换
+        if (events.isNotEmpty() && lastDoneIdx >= 0 && !running) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                listOf("本次" to false, "全部" to true).forEach { (label, all) ->
+                    val active = showAll == all
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = if (active) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.clickable { showAll = all },
+                    ) {
+                        Text(
+                            label,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = if (active) MaterialTheme.colorScheme.onPrimary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+        }
+
+        if (visible.isEmpty()) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(
@@ -1231,7 +1293,7 @@ fun LogsScreen(
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
                 item {
-                    GroupedEventList(events)
+                    GroupedEventList(visible)
                 }
             }
         }
@@ -1375,16 +1437,16 @@ private fun SyncEvent.toPlainText(): String = when (this) {
     is SyncEvent.Fatal -> "错误：$message"
 }
 
-/** 日期显示：今天 / 昨天 / M月d日（周X） */
+/** 日期显示：今天 / 昨天 / M月d日 */
 private fun dateText(d: LocalDate): String {
     val today = LocalDate.now()
-    val week = listOf("周一", "周二", "周三", "周四", "周五", "周六", "周日")[d.dayOfWeek.value - 1]
     return when (d) {
-        today -> "今天 · ${d.monthValue}月${d.dayOfMonth}日 $week"
-        today.minusDays(1) -> "昨天 · ${d.monthValue}月${d.dayOfMonth}日 $week"
-        else -> "${d.monthValue}月${d.dayOfMonth}日 $week"
+        today -> "今天 · ${d.monthValue}月${d.dayOfMonth}日"
+        today.minusDays(1) -> "昨天 · ${d.monthValue}月${d.dayOfMonth}日"
+        else -> "${d.monthValue}月${d.dayOfMonth}日"
     }
 }
+
 
 /** 平台就绪卡 —— 平台优先，同步页顶部 */
 @Composable

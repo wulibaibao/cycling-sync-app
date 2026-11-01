@@ -102,4 +102,78 @@ class DedupTest {
         assertFalse(idx.matchesFingerprint(base, 40_200.0))
         assertFalse(idx.matchesAux("anything"))
     }
+
+    /**
+     * IGPSPORT 的 startTime 是点号格式 "2026.10.31"。
+     *
+     * 之前 parseTime 只认 "yyyy-MM-dd"，点号格式解析失败返回 null →
+     * 该平台所有记录的指纹都算不出来 → 判重失效 + 日期过滤把记录全滤掉
+     * （表现为「发现 1 条，0 条在 2026-10-31」）。
+     */
+    @Test
+    fun `parseTime 兼容 IGPSPORT 点号日期格式`() {
+        val dotted = DedupIndex.parseTime("2026.10.31")
+        val dashed = DedupIndex.parseTime("2026-10-31")
+        assertTrue("点号格式应能解析", dotted != null)
+        assertEquals("点号与横杠应解析到同一天", dashed, dotted)
+    }
+
+    @Test
+    fun `parseTime 兼容各种平台时间格式`() {
+        val expected = DedupIndex.parseTime("2026-10-31 08:12:33")
+        assertTrue(expected != null)
+        listOf(
+            "2026.10.31 08:12:33",
+            "2026/10/31 08:12:33",
+            "2026-10-31T08:12:33",
+        ).forEach { s ->
+            assertEquals("格式 $s 应解析一致", expected, DedupIndex.parseTime(s))
+        }
+    }
+
+    @Test
+    fun `parseTime 非法输入返回 null`() {
+        assertNull(DedupIndex.parseTime(""))
+        assertNull(DedupIndex.parseTime("   "))
+        assertNull(DedupIndex.parseTime("not-a-date"))
+    }
+
+
+    /**
+     * IGPSPORT 的 startTime 只有日期 → 解析成当天 00:00:00。
+     * 目标平台的记录带真实时刻（06:00:38），差好几个小时，
+     * ±15 秒的指纹匹配不上 → 会重复上传。
+     *
+     * 所以 dateOnly 的源必须走 matchesSameDay（同日 + 距离）。
+     */
+    @Test
+    fun `同日不同时刻 距离相同 → 同日判重命中`() {
+        val idx = DedupIndex()
+        // 目标平台记录：2026-10-29 06:00:38（东八区）
+        val real = DedupIndex.parseTime("2026-10-29 06:00:38")!!
+        idx.add(real, 40_205.0)
+
+        // IGPSPORT 侧：只有日期 → 00:00:00
+        val dateOnly = DedupIndex.parseTime("2026.10.29")!!
+
+        assertFalse("±15 秒指纹不应命中（差 6 小时）", idx.matchesFingerprint(dateOnly, 40_205.0))
+        assertTrue("同日判重应命中", idx.matchesSameDay(dateOnly, 40_205.0))
+    }
+
+    @Test
+    fun `不同日 距离相同 → 同日判重不命中`() {
+        val idx = DedupIndex()
+        idx.add(DedupIndex.parseTime("2026-10-29 06:00:38"), 40_205.0)
+        val other = DedupIndex.parseTime("2026.10.30")!!
+        assertFalse(idx.matchesSameDay(other, 40_205.0))
+    }
+
+    @Test
+    fun `同日但距离差太多 → 同日判重不命中`() {
+        val idx = DedupIndex()
+        idx.add(DedupIndex.parseTime("2026-10-29 06:00:38"), 40_205.0)
+        val dateOnly = DedupIndex.parseTime("2026.10.29")!!
+        assertFalse("距离差 10km 超过容差", idx.matchesSameDay(dateOnly, 50_000.0))
+    }
+
 }

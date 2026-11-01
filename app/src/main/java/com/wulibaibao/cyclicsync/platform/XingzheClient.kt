@@ -74,14 +74,28 @@ internal class XingzheClient {
         "Referer" to "https://www.imxingzhe.com/login",
     )
 
+    /**
+     * 带 sessionid 的请求头。
+     *
+     * ⚠️ 这里**故意不带 Content-Type**：
+     * multipart 上传时 Http.multipart 会自己设 `multipart/form-data; boundary=...`，
+     * 如果这里先带了 `application/json`，HttpURLConnection.setRequestProperty
+     * 是「后设覆盖先设」→ 边界被抹掉 → 服务端 415
+     * `Unsupported media type "application/json"` → 文件根本没上传。
+     *
+     * 普通 JSON 请求用 [sessionJsonHeaders]。
+     */
     private fun sessionHeaders(): Map<String, String> = mapOf(
-        "Content-Type" to "application/json",
         "Accept" to "application/json, text/plain, */*",
         "User-Agent" to UA,
         "Origin" to "https://imxingzhe.com",
         "Referer" to "imxingzhe.com/",
         "Cookie" to "sessionid=$sessionId",
     )
+
+    /** 普通 JSON 请求用：显式声明 application/json */
+    private fun sessionJsonHeaders(): Map<String, String> =
+        sessionHeaders() + ("Content-Type" to "application/json")
 
     // ------------------------------------------------------------ RSA
 
@@ -307,7 +321,7 @@ internal class XingzheClient {
         val r = Http.request(
             method = "GET",
             url = url,
-            headers = sessionHeaders(),
+            headers = sessionJsonHeaders(),
         )
         if (r.code == 401 || r.code == 403) {
             return Result.failure(Exception("登录已过期，请重新登录"))
@@ -338,6 +352,9 @@ internal class XingzheClient {
     ): Result<UploadOutcome> {
         if (!isLoggedIn()) return Result.failure(Exception("未登录"))
         val md5 = Crypto.md5Bytes(fitBytes)
+        // ⚠️ 必须用 sessionHeaders()（不带 Content-Type）——
+        // Http.multipart 内部会设 multipart/form-data; boundary=...
+        // 提前带 application/json 会覆盖 boundary → 服务端 415 → 文件传不上去。
         val r = Http.multipart(
             url = UPLOAD_API,
             headers = sessionHeaders(),

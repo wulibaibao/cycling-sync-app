@@ -328,19 +328,6 @@ class SyncEngine(
         return out
     }
 
-    /** 判断时间字符串是否落在目标日期（兼容 "2026-10-29 08:12:33"） */
-    private fun sameDay(timeStr: String, target: java.time.LocalDate): Boolean {
-        if (timeStr.isBlank()) return false
-        return try {
-            val d = timeStr.trim().substring(0, 10)
-            java.time.LocalDate.parse(
-                d,
-                java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd"),
-            ) == target
-        } catch (e: Exception) {
-            false
-        }
-    }
 
     private suspend fun fetchXingzheExisting(): DedupIndex {
         val idx = DedupIndex()
@@ -548,9 +535,20 @@ class SyncEngine(
             return RideResult.Skipped(date, name, km, "已同步过（本地记录）")
         }
         // 判重 2：服务端索引指纹
-        if (existing.matchesFingerprint(actStartMs, actDistM)) {
+        // IGPSPORT 的 startTime 只有日期（解析成当天 00:00:00），目标平台的记录带真实时刻
+        // （06:00:38、07:02:49…），±15 秒的指纹永远匹配不上 → 会重复上传。
+        // 所以源平台时间精度不足时，退化成「同日 + 距离」判重。
+        val hit = if (act.dateOnly) {
+            existing.matchesSameDay(actStartMs, actDistM)
+        } else {
+            existing.matchesFingerprint(actStartMs, actDistM)
+        }
+        if (hit) {
             history.markSynced(SyncDirection.IGP_TO_XINGZHE, actStartMs, actDistM)
-            return RideResult.Skipped(date, name, km, "已存在（时间+距离匹配）")
+            return RideResult.Skipped(
+                date, name, km,
+                if (act.dateOnly) "已存在（同日+距离匹配）" else "已存在（时间+距离匹配）",
+            )
         }
         val fit = igp.downloadFit(act.rideId).getOrElse {
             return RideResult.Failed(date, name, km, "下载 FIT 失败: ${it.message}")
@@ -605,5 +603,33 @@ class SyncEngine(
             val distanceKm: Double,
             val reason: String,
         ) : RideResult()
+    }
+}
+
+/**
+ * 判断时间字符串是否落在目标日期。
+ *
+ * 各平台的时间格式不一样，必须都兼容：
+ * - IGPSPORT: "2026.10.31"              （点分隔）
+ * - IGPSPORT: "2026.10.31 08:12:33"
+ * - 行者:     "2026-10-29T08:12:33"
+ * - 顽鹿:     "2026-10-29"
+ *
+ * 之前只认 "yyyy-MM-dd"，IGPSPORT 的点号格式解析失败 → 返回 false →
+ * 该平台所有记录都被过滤掉，表现为「发现 1 条，0 条在 2026-10-31」。
+ */
+internal fun sameDay(timeStr: String, target: java.time.LocalDate): Boolean {
+    if (timeStr.isBlank()) return false
+    val raw = timeStr.trim().substringBefore(' ')
+        .substringBefore('T')
+        .replace('/', '.')
+        .replace('.', '-')
+    return try {
+        java.time.LocalDate.parse(
+            raw,
+            java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd"),
+        ) == target
+    } catch (e: Exception) {
+        false
     }
 }

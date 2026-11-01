@@ -119,6 +119,7 @@ private fun LogsScreenPreview() {
     CyclingSyncTheme {
         LogsScreen(
             events = previewEvents,
+            running = false,
             onBack = {},
             onClear = {},
         )

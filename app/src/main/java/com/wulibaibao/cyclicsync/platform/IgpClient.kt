@@ -281,16 +281,22 @@ internal class IgpClient {
         val out = mutableListOf<IgpActivity>()
         (list as? kotlinx.serialization.json.JsonArray)?.forEach { el ->
             val o = el.jsonObject
+            val rawStart = o["startTime"]?.jsonPrimitive?.content
+                ?: o["rideDate"]?.jsonPrimitive?.content ?: ""
             out += IgpActivity(
                 rideId = o["rideId"]?.jsonPrimitive?.content ?: o["id"]?.jsonPrimitive?.content ?: "",
                 name = o["title"]?.jsonPrimitive?.content ?: o["name"]?.jsonPrimitive?.content ?: "",
-                startTime = o["startTime"]?.jsonPrimitive?.content
-                    ?: o["rideDate"]?.jsonPrimitive?.content ?: "",
+                startTime = rawStart,
                 distanceM = o["rideDistance"]?.jsonPrimitive?.content?.toDoubleOrNull()
                     ?: o["distance"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
-                durationSec = o["rideTime"]?.jsonPrimitive?.content?.toLongOrNull()
+                // 时长字段是 totalMovingTime / recordTime（秒），不是 rideTime
+                durationSec = o["totalMovingTime"]?.jsonPrimitive?.content?.toDoubleOrNull()?.toLong()
+                    ?: o["recordTime"]?.jsonPrimitive?.content?.toDoubleOrNull()?.toLong()
+                    ?: o["rideTime"]?.jsonPrimitive?.content?.toLongOrNull()
                     ?: o["duration"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
                 dataStatus = o["dataStatus"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0,
+                // "2026.10.31" 这种只有日期的格式
+                dateOnly = !rawStart.contains(':') && !rawStart.contains('T'),
             )
         }
         return Result.success(out)
@@ -449,4 +455,12 @@ internal data class IgpActivity(
     val distanceM: Double,
     val durationSec: Long,
     val dataStatus: Int,
+    /**
+     * startTime 是否只有日期（没有时分秒）。
+     *
+     * IGPSPORT 的 startTime 格式是 "2026.10.31" —— 解析出来是当天 00:00:00，
+     * 而目标平台的记录带真实时刻。判重时不能用 ±15 秒的指纹，
+     * 要退化成「同日 + 距离」。
+     */
+    val dateOnly: Boolean = false,
 )
