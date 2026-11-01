@@ -1,5 +1,6 @@
 package com.wulibaibao.cyclicsync.data
 
+import com.wulibaibao.cyclicsync.platform.FitCoordRewriter
 import com.wulibaibao.cyclicsync.platform.IgpClient
 import com.wulibaibao.cyclicsync.platform.OneLapClient
 import com.wulibaibao.cyclicsync.platform.XingzheClient
@@ -388,6 +389,27 @@ class SyncEngine(
         return idx
     }
 
+    /**
+     * 坐标系适配 —— 把 FIT 里的 GCJ-02 坐标转成行者用的 WGS-84。
+     *
+     * 实测结论（2026-11-01，真实 FIT + 行者服务端缩略图 A/B 验证）：
+     * | 源 FIT 坐标 | 目标平台 | 需要转换 |
+     * |---|---|---|
+     * | 顽鹿 / 迈金 = GCJ-02 | 行者（WGS-84 底图） | ✅ gcj2wgs |
+     * | 顽鹿 / 迈金 = GCJ-02 | IGPSPORT（GCJ-02 底图） | ❌ 不转 |
+     * | IGPSPORT = GCJ-02 | 行者（WGS-84 底图） | ✅ gcj2wgs |
+     * | IGPSPORT = GCJ-02 | 顽鹿（GCJ-02 底图） | ❌ 不转 |
+     *
+     * 不转的话整条路线偏 400-500m（实测 459m），路线会跑到马路外的建筑区和绿地。
+     *
+     * 注意：**转换后 md5 会变**，所以 md5 判重必须在转换之后算。
+     */
+    private fun adaptCoordsForXingzhe(fit: ByteArray): ByteArray {
+        val r = FitCoordRewriter.gcjToWgs(fit) ?: return fit
+        if (r.pointsChanged == 0) return fit
+        return r.bytes
+    }
+
     private suspend fun processRideToXingzhe(
         ride: com.wulibaibao.cyclicsync.platform.OneLapRide,
         existing: DedupIndex,
@@ -411,14 +433,17 @@ class SyncEngine(
             return RideResult.Failed(date, ride.name, ride.distanceKm, "下载 FIT 失败: ${it.message}")
         }
         val fileName = "onelap_${ride.id}.fit"
-        val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fit)
+        // 坐标系适配：顽鹿 FIT 是 GCJ-02，行者底图是 WGS-84 —— 必须转（否则偏 459m）
+        val fitOut = adaptCoordsForXingzhe(fit)
+        // md5 必须在转换之后算 —— 字节变了 md5 就变了
+        val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fitOut)
         // 判重 3：md5 辅助键
         if (existing.matchesAux(md5)) {
             history.markSynced(SyncDirection.ONELAP_TO_XINGZHE, rideStartMs, rideDistM)
             return RideResult.Skipped(date, ride.name, ride.distanceKm, "已存在（md5）")
         }
         val outcome = xingzhe.uploadFit(
-            fitBytes = fit,
+            fitBytes = fitOut,
             fileName = fileName,
             title = ride.name.ifBlank { "骑行 $date" },
             detail = "来自顽鹿同步",
@@ -553,7 +578,10 @@ class SyncEngine(
         val fit = igp.downloadFit(act.rideId).getOrElse {
             return RideResult.Failed(date, name, km, "下载 FIT 失败: ${it.message}")
         }
-        val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fit)
+        // 坐标系适配：IGPSPORT FIT 是 GCJ-02，行者底图是 WGS-84 —— 必须转（否则偏 459m）
+        val fitOut = adaptCoordsForXingzhe(fit)
+        // md5 必须在转换之后算 —— 字节变了 md5 就变了
+        val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fitOut)
         // 判重 3：md5 辅助键
         if (existing.matchesAux(md5)) {
             history.markSynced(SyncDirection.IGP_TO_XINGZHE, actStartMs, actDistM)
@@ -561,7 +589,7 @@ class SyncEngine(
         }
         val fileName = "igp_${act.rideId}.fit"
         val outcome = xingzhe.uploadFit(
-            fitBytes = fit,
+            fitBytes = fitOut,
             fileName = fileName,
             title = name.take(32),
             detail = "来自 IGPSPORT 同步",
