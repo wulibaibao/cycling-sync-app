@@ -1,5 +1,6 @@
 package com.wulibaibao.cyclicsync.data
 
+import com.wulibaibao.cyclicsync.platform.CityResolver
 import com.wulibaibao.cyclicsync.platform.FitCoordRewriter
 import com.wulibaibao.cyclicsync.platform.IgpClient
 import com.wulibaibao.cyclicsync.platform.OneLapClient
@@ -405,9 +406,55 @@ class SyncEngine(
      * 注意：**转换后 md5 会变**，所以 md5 判重必须在转换之后算。
      */
     private fun adaptCoordsForXingzhe(fit: ByteArray): ByteArray {
-        val r = FitCoordRewriter.gcjToWgs(fit) ?: return fit
-        if (r.pointsChanged == 0) return fit
+        val r = FitCoordRewriter.prepareForXingzhe(fit) ?: return fit
+        if (r.pointsChanged == 0 && !r.virtualActivityFixed) return fit
         return r.bytes
+    }
+
+    /**
+     * 行者的原生标题格式：「日期 时段 城市 类型」
+     * 例：2026-10-28 上午 西安 骑行
+     *
+     * - 日期：活动开始日期
+     * - 时段：服务端按开始时间算（<06 凌晨 / <12 上午 / <18 下午 / ≥18 晚上），
+     *   但客户端要先填对，客户端不填的话服务端也不补
+     * - 城市：**必须客户端上传**，服务端不反查（实测不传就是空）
+     * - 类型：sport=1 → 骑行（传 2/3/4/9 会被判成「虚拟骑行」）
+     *
+     * @param fit 转换后的 FIT（取首点坐标反查城市）
+     * @param startTimeMs 活动开始时间（毫秒）
+     */
+    private fun buildXingzheTitle(fit: ByteArray, startTimeMs: Long?): Pair<String, String> {
+        val zone = java.time.ZoneId.systemDefault()
+        // 时间为空时用「现在」，别用 0L（那是 1970 年，标题会变成 1970-xx-xx）
+        val start = java.time.Instant.ofEpochMilli(startTimeMs ?: System.currentTimeMillis())
+            .atZone(zone)
+        val datePart = start.toLocalDate().toString()
+        val hour = start.hour
+        val period = when {
+            hour < 6 -> "凌晨"
+            hour < 12 -> "上午"
+            hour < 18 -> "下午"
+            else -> "晚上"
+        }
+        // 城市：按转换后的首点坐标（GCJ-02 的坐标拿去匹配城市表会偏 ~500m，
+        // 正好在匹配半径边缘，所以用转换后的 WGS-84 坐标）
+        val city = FitCoordRewriter.prepareForXingzhe(fit)?.let { r ->
+            if (r.wgsFirstLat != null && r.wgsFirstLon != null) {
+                CityResolver.resolve(r.wgsFirstLat, r.wgsFirstLon)
+            } else null
+        } ?: CityResolver.resolveFromRaw(fit)
+        val title = buildString {
+            append(datePart)
+            append(' ')
+            append(period)
+            if (!city.isNullOrBlank()) {
+                append(' ')
+                append(city)
+            }
+            append(" 骑行")
+        }
+        return title to (city ?: "")
     }
 
     private suspend fun processRideToXingzhe(
@@ -434,6 +481,8 @@ class SyncEngine(
         }
         val fileName = "onelap_${ride.id}.fit"
         // 坐标系适配：顽鹿 FIT 是 GCJ-02，行者底图是 WGS-84 —— 必须转（否则偏 459m）
+        // 同时把 session/lap 的 sub_sport 从 virtual_activity 改成 generic，
+        // 否则行者会显示成「虚拟骑行」而不是「骑行」。
         val fitOut = adaptCoordsForXingzhe(fit)
         // md5 必须在转换之后算 —— 字节变了 md5 就变了
         val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fitOut)
@@ -442,11 +491,14 @@ class SyncEngine(
             history.markSynced(SyncDirection.ONELAP_TO_XINGZHE, rideStartMs, rideDistM)
             return RideResult.Skipped(date, ride.name, ride.distanceKm, "已存在（md5）")
         }
+        // 标题格式：日期 时段 城市 骑行（与行者 App 生成的一致）
+        val (title, city) = buildXingzheTitle(fitOut, rideStartMs)
         val outcome = xingzhe.uploadFit(
             fitBytes = fitOut,
             fileName = fileName,
-            title = ride.name.ifBlank { "骑行 $date" },
+            title = title,
             detail = "来自顽鹿同步",
+            city = city,
         ).getOrElse {
             return RideResult.Failed(date, ride.name, ride.distanceKm, "上传失败: ${it.message}")
         }
@@ -579,6 +631,8 @@ class SyncEngine(
             return RideResult.Failed(date, name, km, "下载 FIT 失败: ${it.message}")
         }
         // 坐标系适配：IGPSPORT FIT 是 GCJ-02，行者底图是 WGS-84 —— 必须转（否则偏 459m）
+        // 同时把 session/lap 的 sub_sport 从 virtual_activity 改成 generic，
+        // 否则行者会显示成「虚拟骑行」而不是「骑行」。
         val fitOut = adaptCoordsForXingzhe(fit)
         // md5 必须在转换之后算 —— 字节变了 md5 就变了
         val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fitOut)
@@ -588,11 +642,14 @@ class SyncEngine(
             return RideResult.Skipped(date, name, km, "已存在（md5）")
         }
         val fileName = "igp_${act.rideId}.fit"
+        // 标题格式：日期 时段 城市 骑行（与行者 App 生成的一致）
+        val (title, city) = buildXingzheTitle(fitOut, actStartMs)
         val outcome = xingzhe.uploadFit(
             fitBytes = fitOut,
             fileName = fileName,
-            title = name.take(32),
+            title = title,
             detail = "来自 IGPSPORT 同步",
+            city = city,
         ).getOrElse {
             return RideResult.Failed(date, name, km, "上传失败: ${it.message}")
         }

@@ -349,6 +349,7 @@ internal class XingzheClient {
         fileName: String,
         title: String,
         detail: String = "",
+        city: String = "",
     ): Result<UploadOutcome> {
         if (!isLoggedIn()) return Result.failure(Exception("未登录"))
         val md5 = Crypto.md5Bytes(fitBytes)
@@ -358,15 +359,21 @@ internal class XingzheClient {
         val r = Http.multipart(
             url = UPLOAD_API,
             headers = sessionHeaders(),
-            fields = mapOf(
-                "file_source" to "undefined",
-                "fit_filename" to fileName,
-                "md5" to md5,
-                "name" to fileName,
-                "sport" to "3",
-                "title" to title.take(32),
-                "detail" to detail.take(1500),
-            ),
+            fields = buildMap {
+                put("file_source", "undefined")
+                put("fit_filename", fileName)
+                put("md5", md5)
+                // ⚠️ name 才是行者的实际标题来源（title 字段会被忽略）
+                put("name", title.take(40))
+                // ⚠️ sport=1 才是「骑行」；传 2/3/4/9 行者会显示成「虚拟骑行」
+                put("sport", "1")
+                put("title", title.take(40))
+                put("detail", detail.take(1500))
+                if (city.isNotBlank()) {
+                    put("city", city.take(30))
+                    put("title_city_name", city.take(30))
+                }
+            },
             fileField = "fit_file",
             fileName = fileName,
             fileBytes = fitBytes,

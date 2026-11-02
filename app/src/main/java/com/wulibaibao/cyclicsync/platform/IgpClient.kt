@@ -274,8 +274,27 @@ internal class IgpClient {
             return Result.failure(Exception("IGPS 业务错误 $bizCode: ${msg ?: ""}"))
         }
         // ⚠️ 某天没有记录时服务端返回 {"code":0,"data":null} —— 那是空列表，不是错误
-        val dataObj = obj["data"] as? JsonObject
-        if (dataObj == null) return Result.success(emptyList())
+        // ⚠️ 但 token 失效时 data 是**字符串**（"The Token has expired on ..."），
+        //    之前被当成空列表静默吞掉 → 日志显示「发现 0 条 IGPSPORT 记录」，看不出是登录失效。
+        //    这两种要区分开：null 才是真空，字符串是错误。
+        val rawData = obj["data"]
+        if (rawData == null || rawData is kotlinx.serialization.json.JsonNull) {
+            return Result.success(emptyList())
+        }
+        if (rawData !is JsonObject) {
+            val hint = rawData.jsonPrimitive.content
+            // token 过期 → 先尝试刷新再重试一次
+            if (hint.contains("expired", ignoreCase = true) ||
+                hint.contains("token", ignoreCase = true)
+            ) {
+                refresh()
+                if (hasValidToken()) {
+                    return listActivities(pageSize, beginTime)
+                }
+            }
+            return Result.failure(Exception("IGPSPORT 返回异常: $hint"))
+        }
+        val dataObj = rawData
         val list = dataObj["rows"]
             ?: return Result.failure(Exception("无 data.rows"))
         val out = mutableListOf<IgpActivity>()
