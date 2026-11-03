@@ -313,18 +313,30 @@ class SyncEngine(
     ): List<com.wulibaibao.cyclicsync.platform.OneLapRide> {
         val out = mutableListOf<com.wulibaibao.cyclicsync.platform.OneLapRide>()
         var page = 1
-        while (page <= 5) { // 最多 5 页 = 100 条
-            val batchRes = onelap.listRides(page = page, limit = 20)
+        // ⚠️ 别把页数限制太小：2026-11-02 实测「2026-05-30」的记录在**第 6 页**（第 120 条），
+        //    原来限制 5 页 × 20 条 = 100 条 → 刚好差一页拉不到 → 同步显示「发现 0 条记录」。
+        //    顽鹿的列表 API 支持 limit 最大 200（实测），这里用 100 条/页、最多 30 页兜底。
+        val pageSize = ONELAP_PAGE_SIZE
+        val maxPages = ONELAP_MAX_PAGES
+        var extraPages = 0
+        while (page <= maxPages) {
+            val batchRes = onelap.listRides(page = page, limit = pageSize)
             if (batchRes.isFailure) break
             val batch = batchRes.getOrThrow()
             if (batch.isEmpty()) break
             if (targetDate == null) {
                 out += batch
             } else {
-                out += batch.filter { sameDay(it.startTime, targetDate) }
-                if (batch.any { sameDay(it.startTime, targetDate) }) break
+                val hits = batch.filter { sameDay(it.startTime, targetDate) }
+                out += hits
+                // 列表按时间倒序，找到目标日期后多翻 2 页再停 —— 万一某条记录时间字段异常，
+                // 不会漏掉同一天的另一条。
+                if (hits.isNotEmpty()) {
+                    extraPages++
+                    if (extraPages >= 3) break
+                }
             }
-            if (batch.size < 20) break
+            if (batch.size < pageSize) break
             page++
         }
         return out
@@ -373,8 +385,8 @@ class SyncEngine(
     private suspend fun fetchOnelapExisting(): DedupIndex {
         val idx = DedupIndex()
         var page = 1
-        while (page <= 5) {
-            val batchRes = onelap.listRides(page = page, limit = 20)
+        while (page <= ONELAP_MAX_PAGES) {
+            val batchRes = onelap.listRides(page = page, limit = ONELAP_PAGE_SIZE)
             if (batchRes.isFailure) break
             val batch = batchRes.getOrThrow()
             if (batch.isEmpty()) break
@@ -703,6 +715,22 @@ class SyncEngine(
  * 之前只认 "yyyy-MM-dd"，IGPSPORT 的点号格式解析失败 → 返回 false →
  * 该平台所有记录都被过滤掉，表现为「发现 1 条，0 条在 2026-10-31」。
  */
+/**
+ * 顽鹿列表 API 每页条数。
+ *
+ * 2026-11-02 实测：API 支持 limit 最大 200，limit 越大需要的页数越少
+ * （页偏移 = (page-1) × limit）。用 100 条/页，5 页就能拉完约 460 条历史记录。
+ */
+internal const val ONELAP_PAGE_SIZE = 100
+
+/**
+ * 顽鹿列表最大翻页数。
+ *
+ * ⚠️ 别改小！2026-11-02 实测：用户要同步「2026-05-30」的数据，App 报「发现 0 条顽鹿记录」，
+ * 因为「2026-05-30」在**第 6 页**（limit=20 时），而原来只翻 5 页 —— 刚好差一页漏掉。
+ */
+internal const val ONELAP_MAX_PAGES = 30
+
 internal fun sameDay(timeStr: String, target: java.time.LocalDate): Boolean {
     if (timeStr.isBlank()) return false
     val raw = timeStr.trim().substringBefore(' ')
