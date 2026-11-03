@@ -51,8 +51,8 @@ android {
         applicationId = "com.wulibaibao.cyclicsync"
         minSdk = 24
         targetSdk = 35
-        versionCode = 11
-        versionName = "1.3.1"
+        versionCode = 12
+        versionName = "1.3.2"
         resourceConfigurations += listOf("zh", "en")
 
     }
@@ -148,21 +148,70 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach 
     dependsOn(generateKeysTask)
 }
 
+configurations.all {
+    resolutionStrategy {
+        // ⚠️ 锁死 Compose —— kizitonwose/Calendar 2.5.2 是按 Compose 1.6.1 编译的。
+        //
+        // Compose 1.7+ 把 `SnapPositionInLayout` 改名成 `SnapPosition`，
+        // 而 kizitonwose 用的 `PagerSnapLayoutInfoProvider` 仍引用旧名。
+        // 一旦被顶到 1.7+，R8 会把旧名当没引用的类裁掉，
+        // 运行时 `NoClassDefFoundError` ⇒ App 一打开就崩。
+        //
+        // 这里对全部 Compose 模块强制 1.6.1，不给任何传递依赖顶上去的机会。
+        force(
+            "androidx.compose.ui:ui:1.6.1",
+            "androidx.compose.ui:ui-graphics:1.6.1",
+            "androidx.compose.ui:ui-text:1.6.1",
+            "androidx.compose.ui:ui-unit:1.6.1",
+            "androidx.compose.ui:ui-geometry:1.6.1",
+            "androidx.compose.ui:ui-util:1.6.1",
+            "androidx.compose.ui:ui-tooling:1.6.1",
+            "androidx.compose.ui:ui-tooling-preview:1.6.1",
+            "androidx.compose.foundation:foundation:1.6.1",
+            "androidx.compose.foundation:foundation-layout:1.6.1",
+            "androidx.compose.runtime:runtime:1.6.1",
+            "androidx.compose.runtime:runtime-saveable:1.6.1",
+            "androidx.compose.animation:animation:1.6.1",
+            "androidx.compose.animation:animation-core:1.6.1",
+            "androidx.compose.material:material:1.6.1",
+            "androidx.compose.material:material-icons-core:1.6.1",
+            "androidx.compose.material:material-icons-extended:1.6.1",
+        )
+    }
+}
+
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
-    implementation("androidx.compose.ui:ui:1.7.6")
-    implementation("androidx.compose.material3:material3:1.4.0")
+    implementation("androidx.compose.material3:material3:1.2.1")
     // 日期选择器 —— 可定制月历
     // 2.5.2 是最后一个用 kotlin-stdlib 1.9.x 的版本（2.6+ 要 Kotlin 2.0/2.1）
     implementation("com.kizitonwose.calendar:compose:2.5.2")
-    implementation("androidx.compose.material:material-icons-extended:1.7.6")
+
+    // ⚠️⚠️ Compose 版本必须锁死，别让 Gradle 自由解析 ⚠️⚠️
+    //
+    // kizitonwose/Calendar 2.5.2 是针对 Compose **1.6.1** 编译的，它用了
+    // `PagerSnapLayoutInfoProvider` / `LazyListSnapLayoutInfoProvider`，
+    // 这两个类在 Compose 1.6 里引用 `SnapPositionInLayout`。
+    //
+    // Compose **1.7 起这个类被改名成 `SnapPosition`**，旧名消失。
+    // 如果让 Gradle 把 foundation 顶到 1.7+（项目原本声明 ui 1.7.6，
+    // 会被解析到 1.8.2），R8 收缩时会把 `SnapPositionInLayout`
+    // 当成「没引用的类」裁掉，但 `SnapFlingBehavior` 还在引用它 ——
+    // 运行时直接 `NoClassDefFoundError`，App 一打开就崩。
+    //
+    // 所以 foundation / ui / runtime 全部锁回 1.6.1。
+    implementation("androidx.compose.ui:ui:1.6.1")
+    implementation("androidx.compose.foundation:foundation:1.6.1")
+    implementation("androidx.compose.runtime:runtime:1.6.1")
+    implementation("androidx.compose.animation:animation:1.6.1")
+    implementation("androidx.compose.material:material-icons-extended:1.6.1")
     // debug-only：@Preview 注解 + 离线渲染（android preview render），不进 release 包
-    debugImplementation("androidx.compose.ui:ui-tooling-preview:1.7.6")
-    debugImplementation("androidx.compose.ui:ui-tooling:1.7.6")
+    debugImplementation("androidx.compose.ui:ui-tooling-preview:1.6.1")
+    debugImplementation("androidx.compose.ui:ui-tooling:1.6.1")
     implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")

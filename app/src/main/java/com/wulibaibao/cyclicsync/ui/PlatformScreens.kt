@@ -546,6 +546,7 @@ private fun ClearButton(value: String, onClear: () -> Unit): (@Composable () -> 
 
 // ---------------------------------------------------------------- 单平台配置页// ---------------------------------------------------------------- 单平台配置页
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun PlatformConfigScreen(
     platform: Platform,
