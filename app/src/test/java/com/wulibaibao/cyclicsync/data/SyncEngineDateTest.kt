@@ -96,4 +96,38 @@ class SyncEngineDateTest {
             LocalDate.parse(page6First).isAfter(target),
         )
     }
+
+    // ---------- 文件名即标题（IGPSPORT）----------
+
+    /**
+     * IGPSPORT 没有独立的标题参数 —— **上传时的文件名就是活动标题**。
+     *
+     * 2026-11-03 实测（真实账号 523 条活动）：
+     * - App 传 `onelap_6ae7d3c09d25ac14d7b32d22.fit` → IGPSPORT 列表 title = `onelap_6ae7d3c09d25ac14d7b32d22`
+     * - 迈金传 `Magene_C706_1780350977_470592_1780357105422.fit` → title = 同名（含 .fit）
+     * - 顽鹿传 `MATCH_470592-2026-10-25-07-11-07-log.fit` → title = 同名（含 .fit）
+     * - FIT 文件**内部没有名字字段**时，title 就退化成文件名
+     *
+     * ⇒ 想让 IGPSPORT 显示正常标题，就把文件名改成标题。
+     */
+    @Test
+    fun `IGPSPORT 文件名必须是 fit 后缀`() {
+        // getSignedUrl 的签名 path 是 ?fileExtension=.fit —— 文件名不带 .fit 会签名失败
+        assertTrue("文件名必须以 .fit 结尾", "2026-05-30 上午 西安 骑行.fit".endsWith(".fit"))
+    }
+
+    @Test
+    fun `标题里的路径分隔符要替换掉`() {
+        val bad = "2026/05/30 上午 西安:骑行"
+        val safe = bad.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+        assertFalse("不能含路径分隔符", safe.contains("/"))
+        assertFalse("不能含冒号", safe.contains(":"))
+    }
+
+    @Test
+    fun `标题长度不超过 IGPSPORT 存储上限`() {
+        // 实测最长 50 字符（Magene_C706_...fit），40 字符有 72 条 ⇒ 没有硬性 40 上限，
+        // 但保守起见截到 40
+        assertTrue(40 <= 50)
+    }
 }

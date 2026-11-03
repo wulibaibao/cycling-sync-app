@@ -436,7 +436,18 @@ class SyncEngine(
      * @param fit 转换后的 FIT（取首点坐标反查城市）
      * @param startTimeMs 活动开始时间（毫秒）
      */
-    private fun buildXingzheTitle(fit: ByteArray, startTimeMs: Long?): Pair<String, String> {
+    /**
+     * 生成活动标题：「日期 时段 城市 骑行」
+     *
+     * 例：2026-10-28 上午 西安 骑行
+     *
+     * - **行者**：标题走 `name` 上传参数（`title` 会被忽略），城市走 `city` 参数
+     * - **IGPSPORT**：没有独立的标题参数 —— **上传时的文件名就是标题**
+     *   （实测：传 `onelap_xxx.fit` → IGPSPORT 显示 `onelap_xxx`；去 `.fit` 后缀）
+     *
+     * @return Pair(标题, 城市)
+     */
+    private fun buildActivityTitle(fit: ByteArray, startTimeMs: Long?): Pair<String, String> {
         val zone = java.time.ZoneId.systemDefault()
         // 时间为空时用「现在」，别用 0L（那是 1970 年，标题会变成 1970-xx-xx）
         val start = java.time.Instant.ofEpochMilli(startTimeMs ?: System.currentTimeMillis())
@@ -468,6 +479,10 @@ class SyncEngine(
         }
         return title to (city ?: "")
     }
+
+    /** 兼容旧名。 */
+    private fun buildXingzheTitle(fit: ByteArray, startTimeMs: Long?): Pair<String, String> =
+        buildActivityTitle(fit, startTimeMs)
 
     private suspend fun processRideToXingzhe(
         ride: com.wulibaibao.cyclicsync.platform.OneLapRide,
@@ -559,7 +574,28 @@ class SyncEngine(
             history.markSynced(SyncDirection.ONELAP_TO_IGP, rideStartMs, rideDistM)
             return RideResult.Skipped(date, ride.name, ride.distanceKm, "已存在（md5）")
         }
-        igp.uploadFit(fit, "onelap_${ride.id}.fit").getOrElse {
+        // ★ 坐标转换：GCJ-02 → WGS-84
+        //   IGPSPORT 同步 Strava 活动（Strava 是 WGS-84）能正常贴图，说明它按 WGS-84
+        //   收数据、在显示时转成自己的底图坐标。传 GCJ-02 的 FIT 进去会偏 ~459m。
+        //   （存储层实测原样保存 —— 4307 个坐标逐位相同 —— 但那只是存储，显示才是关键。）
+        //
+        // ★ sub_sport **不改**：IGPSPORT 的 exerciseType 实测几乎全是 0，
+        //   不像行者那样区分「虚拟骑行」，改 sub_sport 没有意义。
+        val rewritten = FitCoordRewriter.prepareForXingzhe(
+            fit = fit,
+            fixSubSport = false,
+            convertCoords = true,
+        )
+        val fitForUpload = rewritten?.bytes ?: fit
+
+        // ★ IGPSPORT 没有独立的标题参数 —— **上传时的文件名就是活动标题**
+        //   实测：传 `onelap_xxx.fit` → IGPSPORT 列表显示 `onelap_xxx`（去掉 .fit 后缀）
+        //   所以这里用「日期 时段 城市 骑行」当文件名，显示出来就是正常标题。
+        val (title, _) = buildActivityTitle(fit, rideStartMs)
+        // 文件名不能带路径分隔符等特殊字符；IGPSPORT 只取前 40 字符
+        val safeTitle = title.replace(Regex("[\\/:*?\"<>|]"), "_").take(40)
+        val fitName = if (safeTitle.isBlank()) "onelap_${ride.id}.fit" else "$safeTitle.fit"
+        igp.uploadFit(fitForUpload, fitName).getOrElse {
             return RideResult.Failed(date, ride.name, ride.distanceKm, "上传失败: ${it.message}")
         }
         history.markSynced(SyncDirection.ONELAP_TO_IGP, rideStartMs, rideDistM)
@@ -598,7 +634,12 @@ class SyncEngine(
             history.markSynced(SyncDirection.IGP_TO_ONELAP, actStartMs, actDistM)
             return RideResult.Skipped(date, name, km, "已存在（md5）")
         }
-        onelap.uploadFit(fit, "igp_${act.rideId}.fit").getOrElse {
+        // 同理：文件名 = 标题。IGPSPORT 活动名（act.name）优先，空的用生成的标题
+        val (genTitle, _) = buildActivityTitle(fit, actStartMs)
+        val titleForFile = act.name.ifBlank { genTitle }
+        val safeTitle = titleForFile.replace(Regex("[\\/:*?\"<>|]"), "_").take(40)
+        val fitName = if (safeTitle.isBlank()) "igp_${act.rideId}.fit" else "$safeTitle.fit"
+        onelap.uploadFit(fit, fitName).getOrElse {
             return RideResult.Failed(date, name, km, "上传失败: ${it.message}")
         }
         history.markSynced(SyncDirection.IGP_TO_ONELAP, actStartMs, actDistM)

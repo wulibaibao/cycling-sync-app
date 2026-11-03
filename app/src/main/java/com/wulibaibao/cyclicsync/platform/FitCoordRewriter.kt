@@ -98,7 +98,13 @@ object FitCoordRewriter {
      *
      * 返回 null 表示文件不是有效 FIT。
      */
-    fun prepareForXingzhe(fit: ByteArray): Result? {
+    fun prepareForXingzhe(
+        fit: ByteArray,
+        /** 是否把 sub_sport 从 virtual_activity(58) 改成 generic(0) */
+        fixSubSport: Boolean = true,
+        /** 是否做 GCJ-02 → WGS-84 坐标转换 */
+        convertCoords: Boolean = true,
+    ): Result? {
         if (fit.size < HEADER_SIZE + 2) return null
         if (fit[8] != '.'.code.toByte() || fit[9] != 'F'.code.toByte() ||
             fit[10] != 'I'.code.toByte() || fit[11] != 'T'.code.toByte()
@@ -109,11 +115,13 @@ object FitCoordRewriter {
 
         // ---- 1. sub_sport: virtual_activity → generic ----
         var fixedVirtual = false
-        for (off in positions.subSports) {
-            if (off < 0 || off >= out.size) continue
-            if ((out[off].toInt() and 0xFF) == SUB_SPORT_VIRTUAL_ACTIVITY) {
-                out[off] = SUB_SPORT_GENERIC.toByte()
-                fixedVirtual = true
+        if (fixSubSport) {
+            for (off in positions.subSports) {
+                if (off < 0 || off >= out.size) continue
+                if ((out[off].toInt() and 0xFF) == SUB_SPORT_VIRTUAL_ACTIVITY) {
+                    out[off] = SUB_SPORT_GENERIC.toByte()
+                    fixedVirtual = true
+                }
             }
         }
 
@@ -142,6 +150,18 @@ object FitCoordRewriter {
                 continue
             }
             if (CoordTransform.isOutOfChina(latDeg, lonDeg)) {
+                i += 2
+                continue
+            }
+            if (!convertCoords) {
+                // 只取首点用于城市反查，不改坐标
+                if (firstLat == null) {
+                    firstLat = latDeg
+                    firstLon = lonDeg
+                    firstMoved = 0.0
+                    wgsFirstLat = latDeg
+                    wgsFirstLon = lonDeg
+                }
                 i += 2
                 continue
             }

@@ -178,4 +178,49 @@ class CoordTransformTest {
         assertNotNull(r.wgsFirstLon)
         assertEquals("西安", CityResolver.resolve(r.wgsFirstLat!!, r.wgsFirstLon!!))
     }
+
+    // ---------- IGPSPORT 链路：转坐标、不动 sub_sport（2026-11-03）----------
+
+    /**
+     * IGPSPORT 期望 **WGS-84**。
+     *
+     * 证据（2026-11-03 拆 IGPSPORT 网页版 bundle 实测）：
+     * - 底图是高德（`webapi.amap.com/ui/...`），高德是 GCJ-02
+     * - 但活动轨迹数据的字段名是 **`wgs84TrackJsonPath`** —— 服务端统一存 WGS-84，
+     *   前端拿到 WGS-84 再转高德坐标画图
+     * - 与它同步 Strava 活动（Strava 是 WGS-84）能正常贴图吻合
+     *
+     * ⇒ 传 GCJ-02 的 FIT 进去会偏 ~459m。顽鹿→IGPSPORT 必须转。
+     *
+     * 但 IGPSPORT 的 `exerciseType` 实测 523 条里 522 条是 0 —— 它**不区分「虚拟骑行」**，
+     * 所以 sub_sport 不用改（改了没意义，且徒增风险）。
+     */
+    @Test
+    fun `IGPSPORT 链路 转坐标但不改 sub_sport`() {
+        val src = load("synth_onelap_virtual.fit")
+        // IGPSPORT 用法：convertCoords=true, fixSubSport=false
+        val r = FitCoordRewriter.prepareForXingzhe(src, fixSubSport = false, convertCoords = true)
+        assertNotNull("应该能解析", r)
+        assertTrue("坐标应该被转换了", r!!.pointsChanged > 0)
+        assertTrue("位移应在 400-500m", r.movedMeters > 400.0 && r.movedMeters < 500.0)
+        assertTrue("sub_sport 不该被改", !r.virtualActivityFixed)
+    }
+
+    @Test
+    fun `只改 sub_sport 不转坐标`() {
+        val src = load("synth_onelap_virtual.fit")
+        val r = FitCoordRewriter.prepareForXingzhe(src, fixSubSport = true, convertCoords = false)
+        assertNotNull(r)
+        assertTrue("sub_sport 应该被改", r!!.virtualActivityFixed)
+        assertEquals("坐标不该被改", 0, r.pointsChanged)
+    }
+
+    @Test
+    fun `两个开关都关 等于原样`() {
+        val src = load("synth_onelap_virtual.fit")
+        val r = FitCoordRewriter.prepareForXingzhe(src, fixSubSport = false, convertCoords = false)
+        assertNotNull(r)
+        assertEquals(0, r!!.pointsChanged)
+        assertTrue(!r.virtualActivityFixed)
+    }
 }
