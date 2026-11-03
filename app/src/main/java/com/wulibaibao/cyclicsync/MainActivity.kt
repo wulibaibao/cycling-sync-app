@@ -329,7 +329,7 @@ class MainActivity : ComponentActivity() {
                                         //   + 全量重写文件，O(n²)，界面会被卡死。）
                                         val batch = mutableListOf<SyncEvent>()
                                         try {
-                                            SyncEngine(account, this@MainActivity)
+                                            SyncEngine(account)
                                                 .sync(selected.toList(), target)
                                                 .collect { ev ->
                                                     events.add(ev)

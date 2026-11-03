@@ -178,4 +178,38 @@ class SyncEngineDateTest {
         val ratio = maxOf(offWgs, offGcj) / minOf(offWgs, offGcj)
         assertTrue("两方向偏移量太接近，探测法不可靠", ratio < 1.05)
     }
+
+    // ---------- 判重只看服务端（2026-11-03）----------
+
+    /**
+     * 判重**只能**看服务端索引。
+     *
+     * 背景：之前有「本地同步历史」这道判重，结果踩坑 ——
+     * 服务端那条记录被用户删掉后，本地历史还留着，
+     * 于是每次同步都报「已同步过（本地记录）」，永远补不回来。
+     * 实测：2026-05-30 那条 144.8km 在 IGPSPORT 上根本不存在，
+     * App 却一直跳过它。
+     *
+     * 现在的规则：服务端有 → 跳过；服务端没有 → 传。
+     * 本地历史（SyncHistory）已整类删除。
+     */
+    @Test
+    fun `服务端索引是唯一判重依据`() {
+        val idx = DedupIndex()
+        // 服务端没有这条
+        assertFalse(idx.matchesFingerprint(1780000000000L, 144840.0))
+        // 服务端有这条（时间 ±15s，距离 0.5% 容差内）
+        idx.add(1780000000000L, 144840.0)
+        assertTrue(idx.matchesFingerprint(1780000000000L, 144840.0))
+        assertTrue(idx.matchesFingerprint(1780000005000L, 145000.0))  // 时间差 5s，距离差 160m
+        // 距离差太多 → 不命中
+        assertFalse(idx.matchesFingerprint(1780000000000L, 200000.0))
+    }
+
+    @Test
+    fun `服务端记录被删后 不再卡死`() {
+        // 空索引 = 服务端什么都没有 ⇒ 应该上传（而不是被本地历史拦下）
+        val idx = DedupIndex()
+        assertFalse(idx.matchesFingerprint(1780000000000L, 144840.0))
+    }
 }

@@ -1,6 +1,7 @@
 package com.wulibaibao.cyclicsync.data
 
 import android.content.Context
+import java.io.File
 import android.content.SharedPreferences
 import android.util.Base64
 import com.wulibaibao.cyclicsync.ui.Platform
@@ -81,6 +82,13 @@ class CredentialStore(context: Context) {
     private val appContext = context.applicationContext
     private val prefs: SharedPreferences by lazy {
         appContext.getSharedPreferences(FILE, Context.MODE_PRIVATE)
+    }
+
+    init {
+        // 清理已废弃的本地同步历史文件（2026-11-03）。
+        // 判重改成只看服务端索引后，这份文件没人读了 —— 留着只是垃圾，
+        // 而且用户看到它会以为「本地记录」还在生效。
+        runCatching { File(appContext.filesDir, "sync_history.json").delete() }
     }
 
     /** 自持密钥 —— 内部 prefs + 外部备份各存一份（外部那份卸载后仍在） */

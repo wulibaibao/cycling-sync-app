@@ -84,15 +84,11 @@ sealed class SyncEvent {
  */
 class SyncEngine(
     private val account: PlatformAccount,
-    context: android.content.Context,
 ) {
 
     private val onelap = OneLapClient()
     private val igp = IgpClient()
     private val xingzhe = XingzheClient()
-
-    /** 本地同步历史 —— 防止重复同步时重复上传 */
-    private val history = SyncHistory(context)
 
     private var onelapLoggedIn = false
     private var igpReady = false
@@ -136,8 +132,6 @@ class SyncEngine(
         var totalUploaded = 0
         var totalSkipped = 0
         var totalFailed = 0
-
-        history.load()
 
         val loginError = loginAll()
         if (loginError != null) {
@@ -504,7 +498,6 @@ class SyncEngine(
     private fun buildXingzheTitle(fit: ByteArray, startTimeMs: Long?): Pair<String, String> =
         buildActivityTitle(fit, startTimeMs)
 
-
     private fun adaptCoordsToOnelap(fit: ByteArray, isWgsSource: Boolean): ByteArray {
         if (!isWgsSource) return fit   // 本来就是 GCJ-02，不动
         val r = FitCoordRewriter.prepareForXingzhe(
@@ -523,13 +516,10 @@ class SyncEngine(
         val date = formatDate(ride.startTime)
         val rideStartMs = DedupIndex.parseTime(ride.startTime)
         val rideDistM = ride.distanceKm * 1000.0
-        // 判重 1：本地历史 —— 上次同步成功过，重复同步直接跳过
-        if (history.isSynced(SyncDirection.ONELAP_TO_XINGZHE, rideStartMs, rideDistM)) {
-            return RideResult.Skipped(date, ride.name, ride.distanceKm, "已同步过（本地记录）")
-        }
-        // 判重 2：服务端索引指纹（时间±15s + 距离容差）—— 最可靠
+        // 判重：只看服务端索引（时间±15s + 距离容差）—— 服务端才是权威。
+        // 本地历史不参与判重：服务端记录被删后，本地历史会变成永久地雷，
+        // 导致永远跳过、再也补不回来（2026-11-03 实测踩到）。
         if (existing.matchesFingerprint(rideStartMs, rideDistM)) {
-            history.markSynced(SyncDirection.ONELAP_TO_XINGZHE, rideStartMs, rideDistM)
             return RideResult.Skipped(date, ride.name, ride.distanceKm, "已存在（时间+距离匹配）")
         }
         val fitKey = onelap.fetchDetail(ride.id).getOrElse {
@@ -549,7 +539,6 @@ class SyncEngine(
         val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fitOut)
         // 判重 3：md5 辅助键
         if (existing.matchesAux(md5)) {
-            history.markSynced(SyncDirection.ONELAP_TO_XINGZHE, rideStartMs, rideDistM)
             return RideResult.Skipped(date, ride.name, ride.distanceKm, "已存在（md5）")
         }
         // 标题格式：日期 时段 城市 骑行（与行者 App 生成的一致）
@@ -565,11 +554,9 @@ class SyncEngine(
         }
         return when (outcome) {
             is com.wulibaibao.cyclicsync.platform.UploadOutcome.Uploaded -> {
-                history.markSynced(SyncDirection.ONELAP_TO_XINGZHE, rideStartMs, rideDistM)
                 RideResult.Uploaded(date, ride.name, ride.distanceKm)
             }
             is com.wulibaibao.cyclicsync.platform.UploadOutcome.Duplicate -> {
-                history.markSynced(SyncDirection.ONELAP_TO_XINGZHE, rideStartMs, rideDistM)
                 RideResult.Skipped(date, ride.name, ride.distanceKm, "已上传（服务端判重）")
             }
         }
@@ -587,13 +574,13 @@ class SyncEngine(
         val date = formatDate(ride.startTime)
         val rideStartMs = DedupIndex.parseTime(ride.startTime)
         val rideDistM = ride.distanceKm * 1000.0
-        // 判重 1：本地历史
-        if (history.isSynced(SyncDirection.ONELAP_TO_IGP, rideStartMs, rideDistM)) {
-            return RideResult.Skipped(date, ride.name, ride.distanceKm, "已同步过（本地记录）")
-        }
-        // 判重 2：服务端索引指纹
+        // 判重：只看服务端索引 —— 服务端才是权威。
+        // 本地历史不参与判重：服务端记录被删后，本地历史会变成永久地雷，
+        // 导致永远跳过、再也补不回来（2026-11-03 实测踩到：5-30 那条 144.8km
+        // 在 IGPSPORT 上根本不存在，却一直报「已同步过（本地记录）」）。
         if (existing.matchesFingerprint(rideStartMs, rideDistM)) {
-            history.markSynced(SyncDirection.ONELAP_TO_IGP, rideStartMs, rideDistM)
+            // 服务端已有 ⇒ 不写本地历史（本地历史只记「我确实上传过」，
+            // 写进去会在服务端记录被删后变成永久地雷）
             return RideResult.Skipped(date, ride.name, ride.distanceKm, "已存在（时间+距离匹配）")
         }
         val fitKey = onelap.fetchDetail(ride.id).getOrElse {
@@ -621,7 +608,6 @@ class SyncEngine(
         val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fitForUpload)
         // 判重 3：md5 辅助键
         if (existing.matchesAux(md5)) {
-            history.markSynced(SyncDirection.ONELAP_TO_IGP, rideStartMs, rideDistM)
             return RideResult.Skipped(date, ride.name, ride.distanceKm, "已存在（md5）")
         }
 
@@ -635,7 +621,6 @@ class SyncEngine(
         igp.uploadFit(fitForUpload, fitName).getOrElse {
             return RideResult.Failed(date, ride.name, ride.distanceKm, "上传失败: ${it.message}")
         }
-        history.markSynced(SyncDirection.ONELAP_TO_IGP, rideStartMs, rideDistM)
         return RideResult.Uploaded(date, ride.name, ride.distanceKm)
     }
 
@@ -653,13 +638,9 @@ class SyncEngine(
         val name = act.name.ifBlank { "骑行 $date" }
         val actStartMs = DedupIndex.parseTime(act.startTime)
         val actDistM = act.distanceM
-        // 判重 1：本地历史
-        if (history.isSynced(SyncDirection.IGP_TO_ONELAP, actStartMs, actDistM)) {
-            return RideResult.Skipped(date, name, km, "已同步过（本地记录）")
-        }
-        // 判重 2：服务端索引指纹
+        // 判重：只看服务端索引 —— 服务端才是权威（本地历史不参与，
+        // 否则服务端记录被删后会变成永久地雷，永远补不回来）。
         if (existing.matchesFingerprint(actStartMs, actDistM)) {
-            history.markSynced(SyncDirection.IGP_TO_ONELAP, actStartMs, actDistM)
             return RideResult.Skipped(date, name, km, "已存在（时间+距离匹配）")
         }
         val fit = igp.downloadFit(act.rideId).getOrElse {
@@ -676,7 +657,6 @@ class SyncEngine(
         val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fitOut)
         // 判重 3：md5 辅助键
         if (existing.matchesAux(md5)) {
-            history.markSynced(SyncDirection.IGP_TO_ONELAP, actStartMs, actDistM)
             return RideResult.Skipped(date, name, km, "已存在（md5）")
         }
         // 同理：文件名 = 标题。IGPSPORT 活动名（act.name）优先，空的用生成的标题
@@ -687,7 +667,6 @@ class SyncEngine(
         onelap.uploadFit(fitOut, fitName).getOrElse {
             return RideResult.Failed(date, name, km, "上传失败: ${it.message}")
         }
-        history.markSynced(SyncDirection.IGP_TO_ONELAP, actStartMs, actDistM)
         return RideResult.Uploaded(date, name, km)
     }
 
@@ -705,10 +684,8 @@ class SyncEngine(
         val name = act.name.ifBlank { "骑行 $date" }
         val actStartMs = DedupIndex.parseTime(act.startTime)
         val actDistM = act.distanceM
-        // 判重 1：本地历史
-        if (history.isSynced(SyncDirection.IGP_TO_XINGZHE, actStartMs, actDistM)) {
-            return RideResult.Skipped(date, name, km, "已同步过（本地记录）")
-        }
+        // 判重：只看服务端索引 —— 服务端才是权威（本地历史不参与，
+        // 否则服务端记录被删后会变成永久地雷，永远补不回来）。
         // 判重 2：服务端索引指纹
         // IGPSPORT 的 startTime 只有日期（解析成当天 00:00:00），目标平台的记录带真实时刻
         // （06:00:38、07:02:49…），±15 秒的指纹永远匹配不上 → 会重复上传。
@@ -719,7 +696,7 @@ class SyncEngine(
             existing.matchesFingerprint(actStartMs, actDistM)
         }
         if (hit) {
-            history.markSynced(SyncDirection.IGP_TO_XINGZHE, actStartMs, actDistM)
+            // 服务端已有 ⇒ 不写本地历史（本地历史只记「我确实上传过」）
             return RideResult.Skipped(
                 date, name, km,
                 if (act.dateOnly) "已存在（同日+距离匹配）" else "已存在（时间+距离匹配）",
@@ -742,7 +719,6 @@ class SyncEngine(
         val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fitOut)
         // 判重 3：md5 辅助键
         if (existing.matchesAux(md5)) {
-            history.markSynced(SyncDirection.IGP_TO_XINGZHE, actStartMs, actDistM)
             return RideResult.Skipped(date, name, km, "已存在（md5）")
         }
         val fileName = "igp_${act.rideId}.fit"
@@ -759,11 +735,9 @@ class SyncEngine(
         }
         return when (outcome) {
             is com.wulibaibao.cyclicsync.platform.UploadOutcome.Uploaded -> {
-                history.markSynced(SyncDirection.IGP_TO_XINGZHE, actStartMs, actDistM)
                 RideResult.Uploaded(date, name, km)
             }
             is com.wulibaibao.cyclicsync.platform.UploadOutcome.Duplicate -> {
-                history.markSynced(SyncDirection.IGP_TO_XINGZHE, actStartMs, actDistM)
                 RideResult.Skipped(date, name, km, "已上传（服务端判重）")
             }
         }
