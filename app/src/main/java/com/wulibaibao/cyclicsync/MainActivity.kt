@@ -74,11 +74,20 @@ class MainActivity : ComponentActivity() {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             runCatching {
-                Toast.makeText(
-                    this,
-                    "出错了：${throwable.javaClass.simpleName}",
-                    Toast.LENGTH_LONG,
-                ).show()
+                // ⚠️ 必须带上具体类名 —— 只显示 `NoClassDefFoundError` 等于没说，
+                // 用户截图发过来也没法定位。`NoClassDefFoundError` 的 message
+                // 里就是缺失类的全限定名。
+                val detail = when (throwable) {
+                    is NoClassDefFoundError -> throwable.message?.substringAfterLast(";")
+                        ?.trim()?.takeIf { it.isNotEmpty() } ?: ""
+                    else -> ""
+                }
+                val text = if (detail.isNotEmpty()) {
+                    "出错了：${throwable.javaClass.simpleName}\n$detail"
+                } else {
+                    "出错了：${throwable.javaClass.simpleName}\n${throwable.message?.take(120) ?: ""}"
+                }
+                Toast.makeText(this, text, Toast.LENGTH_LONG).show()
             }
             // 交给系统处理（保留崩溃日志），但先记一笔
             runCatching { android.util.Log.e("CyclingSync", "uncaught", throwable) }
