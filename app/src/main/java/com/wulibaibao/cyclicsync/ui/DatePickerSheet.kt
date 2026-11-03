@@ -3,7 +3,6 @@ package com.wulibaibao.cyclicsync.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -13,7 +12,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.CircleShape
@@ -45,13 +43,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.kizitonwose.calendar.compose.CalendarState
-import com.kizitonwose.calendar.compose.VerticalCalendar
+import com.kizitonwose.calendar.compose.HorizontalCalendar
 import com.kizitonwose.calendar.compose.rememberCalendarState
 import com.kizitonwose.calendar.core.CalendarDay
-import com.kizitonwose.calendar.core.CalendarMonth
 import com.kizitonwose.calendar.core.DayPosition
 import com.kizitonwose.calendar.core.previousMonth
 import com.kizitonwose.calendar.core.nextMonth
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.launch
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -96,14 +94,20 @@ fun DatePickerSheet(
         firstDayOfWeek = DayOfWeek.MONDAY,
     )
 
-    // 当前显示的月份（跟着滚动走）
+    // 当前显示的月份（跟着左右滑动走）
     //
-    // `firstVisibleMonth` 是「第一个可见的月」，翻月动画结束后才更新，
-    // 所以点箭头时自己先改 visibleMonth（立即反馈），滚动结束后再被
-    // snapshotFlow 校正 —— 两者不会打架。
+    // 横向分页日历里 `firstVisibleMonth` = `store[listState.firstVisibleItemIndex]`，
+    // 就是「当前停在的页」。但手指拖动时它会连续变化，标题栏会跟着闪，
+    // 所以只在滚动停下来（isScrollInProgress == false）之后才更新标题。
+    //
+    // 点箭头时自己先改 visibleMonth（立即反馈），滚动结束后再被校正 —— 两者不打架。
     var visibleMonth by remember { mutableStateOf(YearMonth.from(selected)) }
     LaunchedEffect(state) {
-        snapshotFlow { state.firstVisibleMonth.yearMonth }.collect { visibleMonth = it }
+        snapshotFlow { state.isScrollInProgress }
+            .filter { !it }
+            .collect {
+                visibleMonth = state.firstVisibleMonth.yearMonth
+            }
     }
 
     ModalBottomSheet(
@@ -163,16 +167,16 @@ fun DatePickerSheet(
             // ── 星期头（周一开头）──────────────────────────────────
             WeekHeader()
 
-            // ── 月历 ───────────────────────────────────────────────
-            // ⚠️ 必须限制高度：VerticalCalendar 默认是无限高的（纵向滚动的 LazyColumn），
-            // 放进 ModalBottomSheet 会把弹层撑到全屏，标题栏和星期头就被顶出去了。
-            // 这里固定成「刚好一个月」的��度，超出就在内部滚。
-            VerticalCalendar(
+            // ── 月历（横向分页：每个月独立一页）─────────────────────
+            //
+            // ⚠️ 用 HorizontalCalendar 而不是 VerticalCalendar：
+            // 纵向日历会把两个月的网格直接拼在一起（中间没有月份标题），
+            // 看起来像「10 月和 11 月连成一片」，而且标题栏的月份和
+            // 实际看到的日期对不上。横向分页后每个月独立成页，不会连。
+            HorizontalCalendar(
                 state = state,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(320.dp),
-                calendarScrollPaged = false,
+                modifier = Modifier.fillMaxWidth(),
+                calendarScrollPaged = true,
                 contentPadding = androidx.compose.foundation.layout.PaddingValues(
                     horizontal = 12.dp,
                     vertical = 4.dp,

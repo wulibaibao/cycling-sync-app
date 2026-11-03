@@ -51,8 +51,8 @@ android {
         applicationId = "com.wulibaibao.cyclicsync"
         minSdk = 24
         targetSdk = 35
-        versionCode = 10
-        versionName = "1.3.0"
+        versionCode = 11
+        versionName = "1.3.1"
         resourceConfigurations += listOf("zh", "en")
 
     }
