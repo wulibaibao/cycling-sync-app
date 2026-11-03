@@ -104,9 +104,13 @@ class CoordTransformTest {
         for (bytes in listOf(onelapSample, igpSample)) {
             val r = FitCoordRewriter.prepareForXingzhe(bytes)!!
             val crc = FitCoordRewriter.fitCrc(r.bytes, r.bytes.size - 2)
-            val stored = ((r.bytes[r.bytes.size - 2].toInt() and 0xFF) shl 8) or
-                (r.bytes[r.bytes.size - 1].toInt() and 0xFF)
-            assertEquals("文件尾 CRC 不匹配，平台会拒收", stored, crc)
+            // ⚠️ FIT 文件尾的 CRC 是**小端**（低字节在前）。
+            // 这个测试之前写的是大端（shl 8 在前）⇒ 一直是假绿 ⇒
+            // `fixCrc` 的大端 bug 一直没被发现 ⇒ IGPSPORT 解析失败 ⇒
+            // 上传「成功」但活动不生成。
+            val stored = (r.bytes[r.bytes.size - 2].toInt() and 0xFF) or
+                ((r.bytes[r.bytes.size - 1].toInt() and 0xFF) shl 8)
+            assertEquals("文件尾 CRC 不匹配，平台会拒收", crc, stored)
         }
     }
 
@@ -222,5 +226,49 @@ class CoordTransformTest {
         assertNotNull(r)
         assertEquals(0, r!!.pointsChanged)
         assertTrue(!r.virtualActivityFixed)
+    }
+
+    // ---------- CRC 字节序回归（2026-11-03）----------
+
+    /**
+     * 改写后文件尾的 CRC 必须**小端**且能算对。
+     *
+     * 之前 `fixCrc` 写成大端（`crc shr 8` 在前）⇒ 读出来的值高低字节互换
+     * ⇒ fitdecode 报「mismatching CRC in FIT footer」
+     * ⇒ IGPSPORT 服务端解析失败 ⇒ **上传「成功」但活动不生成**（假成功）。
+     *
+     * 小样本测不出来（字段少，改写后 CRC 恰好还是对的），
+     * 必须用**大文件**测（合成样本刻意保留了会触发 bug 的 lap 结构）。
+     */
+    @Test
+    fun `改写后 CRC 小端且正确`() {
+        val src = load("synth_large_lap.fit")
+        val r = FitCoordRewriter.prepareForXingzhe(src, fixSubSport = false, convertCoords = true)
+        assertNotNull("解析失败", r)
+        val out = r!!.bytes
+        // 文件尾 2 字节 = CRC（小端）
+        val stored = (out[out.size - 2].toInt() and 0xFF) or
+            ((out[out.size - 1].toInt() and 0xFF) shl 8)
+        val computed = FitCoordRewriter.fitCrc(out, out.size - 2)
+        assertEquals("CRC 必须小端且等于计算值", computed, stored)
+    }
+
+    /**
+     * 所有坐标点都要被转换（不是一半）。
+     *
+     * 之前 `isCoordField` 把 LAP/SESSION 的字段号也当成坐标
+     * （不同消息类型字段号空间独立，LAP 的 field 2 不是 start_position_lat）
+     * ⇒ 坐标数组多出 88 个 ⇒ `i += 2` 配对错位 ⇒ **只转了一半**。
+     */
+    @Test
+    fun `大文件所有坐标点都被转换`() {
+        val src = load("synth_large_lap.fit")
+        val r = FitCoordRewriter.prepareForXingzhe(src, fixSubSport = false, convertCoords = true)
+        assertNotNull(r)
+        // 这份 FIT 有 17948 个 record 点 ⇒ pointsChanged 必须是 17948
+        // （修复前是 9193 —— 只转了一半）
+        assertEquals("所有 record 点都要转", 17948, r!!.pointsChanged)
+        // 北京的 GCJ 偏移约 550m
+        assertTrue("位移应在 400-700m，实际 ${r.movedMeters}", r.movedMeters > 400.0 && r.movedMeters < 700.0)
     }
 }

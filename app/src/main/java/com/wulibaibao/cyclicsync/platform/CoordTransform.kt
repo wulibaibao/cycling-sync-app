@@ -18,7 +18,11 @@ import kotlin.math.sqrt
  *
  * 所以 **IGPSPORT 里存量活动的坐标系是混杂的**（迈金/顽鹿原生 = GCJ-02，
  * Strava 官方同步 = WGS-84，v1.2.3 起我们上传的 = WGS-84）——
- * 下载 IGPSPORT 的 FIT 时要用 [detectCoordSystem] 探测，不能想当然。
+ * 下载 IGPSPORT 的 FIT 时要**按来源判定**（看 title），不能想当然。
+ *
+ * ⚠️ 不要用「偏移量更小」来探测（2026-11-03 实测 10/10 全错）：
+ * `gcj2wgs` 是 `wgs2gcj` 的近似逆运算，两个方向的偏移量只差 3% 左右，
+ * 根本分辨不出来。
  *
  * 算法来源：标准「火星坐标」转换公式，迭代求解（与 Python 侧 `correct_fit_gpx.py` 一致）。
  */
@@ -95,45 +99,6 @@ object CoordTransform {
         val dl = Math.toRadians(lon2 - lon1)
         val a = sin(dp / 2) * sin(dp / 2) + cos(p1) * cos(p2) * sin(dl / 2) * sin(dl / 2)
         return 2 * r * asin(sqrt(a))
-    }
-
-    /**
-     * 探测一组坐标的坐标系（采样投票法）。
-     *
-     * 移植自 Python 侧 `strava-to-onelap.py` 的 `detect_coord_system`。
-     *
-     * 原理：GCJ-02 偏移量随位置变化。对同一个点：
-     *  - 把它**当作 WGS-84** 正向转成 GCJ-02，看位移量 `offWgs`
-     *  - 把它**当作 GCJ-02** 反解成 WGS-84，看位移量 `offGcj`
-     * 真实坐标系下，这两个值不等；且真实的那一个**更小**。
-     * margin = (offGcj - offWgs) / max(offWgs, offGcj)
-     * margin > 0 ⇒ WGS-84，margin < 0 ⇒ GCJ-02。
-     *
-     * ⚠️ 方向别搞反 —— 早期版本反了，导致 10/10 全票判错。
-     *
-     * @param samples 坐标点（度）
-     * @return null = 无法判定（境外 / 样本不足 / 票数持平）
-     */
-    fun detectCoordSystem(samples: List<DoubleArray>): Boolean? {
-        val pts = samples.take(MAX_SAMPLES).filter { !isOutOfChina(it[0], it[1]) }
-        if (pts.isEmpty()) return null
-        var votesWgs = 0
-        var votesGcj = 0
-        for (p in pts) {
-            val lat = p[0]
-            val lon = p[1]
-            // 当作 WGS-84 → GCJ-02 的位移量
-            val asWgs = wgsToGcj(lat, lon)
-            val offWgs = Math.hypot(asWgs[0] - lat, asWgs[1] - lon)
-            // 当作 GCJ-02 → WGS-84 的位移量
-            val asGcj = gcjToWgs(lat, lon)
-            val offGcj = Math.hypot(asGcj[0] - lat, asGcj[1] - lon)
-            if (offGcj <= 0.0) continue
-            val margin = (offGcj - offWgs) / maxOf(abs(offWgs), abs(offGcj))
-            if (margin > 0) votesWgs++ else votesGcj++
-        }
-        if (votesWgs == votesGcj) return null
-        return votesWgs > votesGcj
     }
 
     /** 探测采样点数上限。 */

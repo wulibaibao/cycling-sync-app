@@ -207,35 +207,6 @@ object FitCoordRewriter {
     fun gcjToWgs(fit: ByteArray): Result? = prepareForXingzhe(fit)
 
     /**
-     * 取 FIT 里前 N 个轨迹点的**原始**坐标（不转换）。
-     *
-     * 用于 [CoordTransform.detectCoordSystem] 判定坐标系 —— IGPSPORT 里存量活动的
-     * 坐标系是混杂的（迈金/顽鹿原生 = GCJ-02，Strava 官方同步 = WGS-84，
-     * v1.2.3 起我们上传的 = WGS-84），不能想当然。
-     *
-     * @return 坐标点数组，每个是 [lat, lon]（度）。解析失败返回空数组。
-     */
-    fun sampleRawPoints(fit: ByteArray, maxPoints: Int = 10): List<DoubleArray> {
-        if (fit.size < HEADER_SIZE + 2) return emptyList()
-        val pos = findPositions(fit) ?: return emptyList()
-        val out = mutableListOf<DoubleArray>()
-        var i = 0
-        while (i + 1 < pos.coords.size && out.size < maxPoints) {
-            val latOff = pos.coords[i]
-            val lonOff = pos.coords[i + 1]
-            if (latOff + 3 < fit.size && lonOff + 3 < fit.size) {
-                val rawLat = readUInt32(fit, latOff, pos.bigEndian)
-                val rawLon = readUInt32(fit, lonOff, pos.bigEndian)
-                if (rawLat != 0xFFFFFFFFL && rawLon != 0xFFFFFFFFL) {
-                    out.add(doubleArrayOf(rawLat * SEMICIRCLE_TO_DEG, rawLon * SEMICIRCLE_TO_DEG))
-                }
-            }
-            i += 2
-        }
-        return out
-    }
-
-    /**
      * 取 FIT 里第一个轨迹点的**原始**坐标（不转换）。
      * 用于城市反查的兜底路径。
      */
@@ -351,13 +322,26 @@ object FitCoordRewriter {
         else -> false
     }
 
-    /** 判断某个 (消息类型, 字段号) 是否是坐标字段。 */
+    /**
+     * 判断某个 (消息类型, 字段号) 是否是坐标字段。
+     *
+     * ⚠️ **只处理 record 消息**（2026-11-03 修）。
+     *
+     * 之前还把 LAP / SESSION 的字段号也算进来了，但**不同消息类型的字段号空间是独立的**：
+     * LAP 的 field 2 不是 `start_position_lat`，SESSION 的 field 48/59 也不是 nec_lat/long
+     * （FIT 规范里 nec_lat 是 48、nec_long 是 59，但各家设备不一定这么写）。
+     *
+     * 实测踩坑：迈金 C706 的一份 17948 点的 FIT 里，
+     * LAP 消息的 field 2 被误判成 start_position_lat ⇒ 坐标字段多出 88 个（44 对）
+     * ⇒ 后面 `i += 2` 配对全部错位 ⇒ **只转了一半的坐标**（9193/17948），
+     * 而且 CRC 重算基于改坏的字节 ⇒ IGPSPORT 服务端解析失败 ⇒
+     * **上传「成功」但活动不生成**（假成功）。
+     *
+     * record 的 position_lat/long（field 0/1）是规范里唯一定义的轨迹点坐标，
+     * 只改它就够了 —— lap/session 的辅助坐标改了也没用（不同平台的底图不用它们）。
+     */
     private fun isCoordField(gmn: Int, defNum: Int): Boolean = when (gmn) {
         GMN_RECORD -> defNum == FDN_POSITION_LAT || defNum == FDN_POSITION_LONG
-        GMN_LAP -> defNum == FDN_START_POSITION_LAT || defNum == FDN_START_POSITION_LONG ||
-            defNum == FDN_END_POSITION_LAT || defNum == FDN_END_POSITION_LONG
-        GMN_SESSION -> defNum == FDN_NEC_LAT || defNum == FDN_NEC_LONG ||
-            defNum == FDN_SWC_LAT || defNum == FDN_SWC_LONG
         else -> false
     }
 
@@ -387,11 +371,18 @@ object FitCoordRewriter {
         }
     }
 
-    /** FIT NORMAL CRC（多项式 0xA001），重算文件尾 2 字节。 */
+    /**
+     * FIT NORMAL CRC（多项式 0xA001），重算文件尾 2 字节。
+     *
+     * ⚠️ **必须小端**（2026-11-03 修）：文件尾两个字节是 **低字节在前**。
+     * 之前写成大端（`crc shr 8` 在前）⇒ 读出来的 CRC 值刚好高低字节互换 ⇒
+     * fitdecode 报「mismatching CRC in FIT footer」⇒
+     * IGPSPORT 服务端解析失败 ⇒ **上传「成功」但活动不生成**（假成功）。
+     */
     private fun fixCrc(data: ByteArray) {
         val crc = fitCrc(data, data.size - 2)
-        data[data.size - 2] = ((crc shr 8) and 0xFF).toByte()
-        data[data.size - 1] = (crc and 0xFF).toByte()
+        data[data.size - 2] = (crc and 0xFF).toByte()          // 低字节在前
+        data[data.size - 1] = ((crc shr 8) and 0xFF).toByte()
     }
 
     internal fun fitCrc(data: ByteArray, length: Int): Int {
