@@ -64,7 +64,12 @@ object FitCoordRewriter {
         val movedMeters: Double,
         /** 是否把 sub_sport 从 virtual_activity 改成了 generic */
         val virtualActivityFixed: Boolean = false,
-        /** 转换后的首个轨迹点（WGS-84），用于反查城市。null = 无坐标 */
+        /**
+         * 转换后的首个轨迹点（**目标坐标系**），null = 无坐标。
+         *
+         * 目标坐标系是 WGS-84 时（`targetIsGcj = false`）它就是 WGS-84，
+         * 可以直接拿去反查城市（城市表是 WGS-84 的）。
+         */
         val wgsFirstLat: Double? = null,
         val wgsFirstLon: Double? = null,
     ) {
@@ -102,8 +107,10 @@ object FitCoordRewriter {
         fit: ByteArray,
         /** 是否把 sub_sport 从 virtual_activity(58) 改成 generic(0) */
         fixSubSport: Boolean = true,
-        /** 是否做 GCJ-02 → WGS-84 坐标转换 */
+        /** 是否做坐标转换 */
         convertCoords: Boolean = true,
+        /** 目标坐标系。GCJ-02 → WGS-84 时传 false；WGS-84 → GCJ-02 时传 true。 */
+        targetIsGcj: Boolean = false,
     ): Result? {
         if (fit.size < HEADER_SIZE + 2) return null
         if (fit[8] != '.'.code.toByte() || fit[9] != 'F'.code.toByte() ||
@@ -165,20 +172,25 @@ object FitCoordRewriter {
                 i += 2
                 continue
             }
-            val wgs = CoordTransform.gcjToWgs(latDeg, lonDeg)
-            val newLat = (wgs[0] * DEG_TO_SEMICIRCLE).toInt()
-            val newLon = (wgs[1] * DEG_TO_SEMICIRCLE).toInt()
+            val conv = if (targetIsGcj) {
+                CoordTransform.wgsToGcj(latDeg, lonDeg)
+            } else {
+                CoordTransform.gcjToWgs(latDeg, lonDeg)
+            }
+            val newLat = (conv[0] * DEG_TO_SEMICIRCLE).toInt()
+            val newLon = (conv[1] * DEG_TO_SEMICIRCLE).toInt()
             writeUInt32(out, latOff, newLat.toLong() and 0xFFFFFFFFL, positions.bigEndian)
             writeUInt32(out, lonOff, newLon.toLong() and 0xFFFFFFFFL, positions.bigEndian)
             changed++
             if (firstLat == null) {
                 firstLat = latDeg
                 firstLon = lonDeg
-                firstMoved = CoordTransform.distanceMeters(latDeg, lonDeg, wgs[0], wgs[1])
+                firstMoved = CoordTransform.distanceMeters(latDeg, lonDeg, conv[0], conv[1])
             }
+            // 转换后的首点（目标坐标系）。城市反查用 WGS-84 时才用它。
             if (wgsFirstLat == null) {
-                wgsFirstLat = wgs[0]
-                wgsFirstLon = wgs[1]
+                wgsFirstLat = conv[0]
+                wgsFirstLon = conv[1]
             }
             i += 2
         }
@@ -193,6 +205,35 @@ object FitCoordRewriter {
 
     /** 只做坐标转换（旧接口语义保留）。 */
     fun gcjToWgs(fit: ByteArray): Result? = prepareForXingzhe(fit)
+
+    /**
+     * 取 FIT 里前 N 个轨迹点的**原始**坐标（不转换）。
+     *
+     * 用于 [CoordTransform.detectCoordSystem] 判定坐标系 —— IGPSPORT 里存量活动的
+     * 坐标系是混杂的（迈金/顽鹿原生 = GCJ-02，Strava 官方同步 = WGS-84，
+     * v1.2.3 起我们上传的 = WGS-84），不能想当然。
+     *
+     * @return 坐标点数组，每个是 [lat, lon]（度）。解析失败返回空数组。
+     */
+    fun sampleRawPoints(fit: ByteArray, maxPoints: Int = 10): List<DoubleArray> {
+        if (fit.size < HEADER_SIZE + 2) return emptyList()
+        val pos = findPositions(fit) ?: return emptyList()
+        val out = mutableListOf<DoubleArray>()
+        var i = 0
+        while (i + 1 < pos.coords.size && out.size < maxPoints) {
+            val latOff = pos.coords[i]
+            val lonOff = pos.coords[i + 1]
+            if (latOff + 3 < fit.size && lonOff + 3 < fit.size) {
+                val rawLat = readUInt32(fit, latOff, pos.bigEndian)
+                val rawLon = readUInt32(fit, lonOff, pos.bigEndian)
+                if (rawLat != 0xFFFFFFFFL && rawLon != 0xFFFFFFFFL) {
+                    out.add(doubleArrayOf(rawLat * SEMICIRCLE_TO_DEG, rawLon * SEMICIRCLE_TO_DEG))
+                }
+            }
+            i += 2
+        }
+        return out
+    }
 
     /**
      * 取 FIT 里第一个轨迹点的**原始**坐标（不转换）。

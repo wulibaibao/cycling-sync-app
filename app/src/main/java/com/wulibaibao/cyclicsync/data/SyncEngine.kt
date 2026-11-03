@@ -342,7 +342,6 @@ class SyncEngine(
         return out
     }
 
-
     private suspend fun fetchXingzheExisting(): DedupIndex {
         val idx = DedupIndex()
         var offset = 0
@@ -403,25 +402,46 @@ class SyncEngine(
     }
 
     /**
+     * 坐标系适配 —— 把 FIT 转成**行者**要的 WGS-84。
+     *
+     * 先探测源坐标系（IGPSPORT 里混杂，见 [adaptCoordsToOnelap] 的表格）：
+     * - 已经是 WGS-84 → 不动坐标，只改 sub_sport
+     * - 是 GCJ-02 → 转成 WGS-84，同时改 sub_sport
+     *
+     * 探不出来时按「转」处理 —— 行者是四条链路里唯一确定要 WGS-84 的目标。
+     */
+    private fun adaptCoordsToXingzhe(fit: ByteArray, isWgsSource: Boolean): ByteArray {
+        val r = FitCoordRewriter.prepareForXingzhe(
+            fit = fit,
+            fixSubSport = true,
+            convertCoords = isWgsSource.not(),
+            targetIsGcj = false,
+        ) ?: return fit
+        if (r.pointsChanged == 0 && !r.virtualActivityFixed) return fit
+        return r.bytes
+    }
+
+    /**
      * 坐标系适配 —— 把 FIT 里的 GCJ-02 坐标转成行者用的 WGS-84。
      *
-     * 实测结论（2026-11-01，真实 FIT + 行者服务端缩略图 A/B 验证）：
+     * 实测结论（2026-11-01 行者侧；2026-11-03 修正 IGPSPORT 侧）：
      * | 源 FIT 坐标 | 目标平台 | 需要转换 |
      * |---|---|---|
      * | 顽鹿 / 迈金 = GCJ-02 | 行者（WGS-84 底图） | ✅ gcj2wgs |
-     * | 顽鹿 / 迈金 = GCJ-02 | IGPSPORT（GCJ-02 底图） | ❌ 不转 |
-     * | IGPSPORT = GCJ-02 | 行者（WGS-84 底图） | ✅ gcj2wgs |
-     * | IGPSPORT = GCJ-02 | 顽鹿（GCJ-02 底图） | ❌ 不转 |
+     * | 顽鹿 / 迈金 = GCJ-02 | IGPSPORT（**收 WGS-84**） | ✅ gcj2wgs |
+     * | IGPSPORT 下载的 FIT | 行者（WGS-84 底图） | ✅ gcj2wgs |
+     * | IGPSPORT 下载的 FIT | 顽鹿（GCJ-02 底图） | ❌ 不转 |
+     *
+     * ⚠️ **IGPSPORT 收 WGS-84**（2026-11-03 拆它网页版 bundle 实测）：
+     * 底图是高德（GCJ-02），但轨迹数据字段名叫 `wgs84TrackJsonPath` ——
+     * 服务端统一存 WGS-84，前端拿到后再转高德画图。
+     * 之前误判成「IGPSPORT 不用转」，只验了存储层（下载回来的 FIT 与源逐位相同）
+     * 没验显示层 —— **存储保真 ≠ 显示原样**。
      *
      * 不转的话整条路线偏 400-500m（实测 459m），路线会跑到马路外的建筑区和绿地。
      *
      * 注意：**转换后 md5 会变**，所以 md5 判重必须在转换之后算。
      */
-    private fun adaptCoordsForXingzhe(fit: ByteArray): ByteArray {
-        val r = FitCoordRewriter.prepareForXingzhe(fit) ?: return fit
-        if (r.pointsChanged == 0 && !r.virtualActivityFixed) return fit
-        return r.bytes
-    }
 
     /**
      * 行者的原生标题格式：「日期 时段 城市 类型」
@@ -484,6 +504,18 @@ class SyncEngine(
     private fun buildXingzheTitle(fit: ByteArray, startTimeMs: Long?): Pair<String, String> =
         buildActivityTitle(fit, startTimeMs)
 
+
+    private fun adaptCoordsToOnelap(fit: ByteArray, isWgsSource: Boolean): ByteArray {
+        if (!isWgsSource) return fit   // 本来就是 GCJ-02，不动
+        val r = FitCoordRewriter.prepareForXingzhe(
+            fit = fit,
+            fixSubSport = false,
+            convertCoords = true,
+            targetIsGcj = true,
+        ) ?: return fit
+        return r.bytes
+    }
+
     private suspend fun processRideToXingzhe(
         ride: com.wulibaibao.cyclicsync.platform.OneLapRide,
         existing: DedupIndex,
@@ -507,10 +539,12 @@ class SyncEngine(
             return RideResult.Failed(date, ride.name, ride.distanceKm, "下载 FIT 失败: ${it.message}")
         }
         val fileName = "onelap_${ride.id}.fit"
-        // 坐标系适配：顽鹿 FIT 是 GCJ-02，行者底图是 WGS-84 —— 必须转（否则偏 459m）
+        // 坐标系适配：行者底图是 WGS-84 —— 需要 WGS-84 的 FIT（不转会偏 459m）。
+        // 顽鹿原生 FIT 是 GCJ-02，但用探测更保险（万一顽鹿里混了 WGS-84 的活动）。
         // 同时把 session/lap 的 sub_sport 从 virtual_activity 改成 generic，
         // 否则行者会显示成「虚拟骑行」而不是「骑行」。
-        val fitOut = adaptCoordsForXingzhe(fit)
+        // 顽鹿原生 FIT 是 GCJ-02，行者要 WGS-84 ⇒ 需要转
+        val fitOut = adaptCoordsToXingzhe(fit, isWgsSource = false)
         // md5 必须在转换之后算 —— 字节变了 md5 就变了
         val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fitOut)
         // 判重 3：md5 辅助键
@@ -568,12 +602,6 @@ class SyncEngine(
         val fit = onelap.downloadFit(fitKey).getOrElse {
             return RideResult.Failed(date, ride.name, ride.distanceKm, "下载 FIT 失败: ${it.message}")
         }
-        val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fit)
-        // 判重 3：md5 辅助键
-        if (existing.matchesAux(md5)) {
-            history.markSynced(SyncDirection.ONELAP_TO_IGP, rideStartMs, rideDistM)
-            return RideResult.Skipped(date, ride.name, ride.distanceKm, "已存在（md5）")
-        }
         // ★ 坐标转换：GCJ-02 → WGS-84
         //   IGPSPORT 同步 Strava 活动（Strava 是 WGS-84）能正常贴图，说明它按 WGS-84
         //   收数据、在显示时转成自己的底图坐标。传 GCJ-02 的 FIT 进去会偏 ~459m。
@@ -587,6 +615,15 @@ class SyncEngine(
             convertCoords = true,
         )
         val fitForUpload = rewritten?.bytes ?: fit
+
+        // ⚠️ md5 必须在**转换之后**算 —— 坐标转换改了 FIT 字节，md5 会变。
+        //    用转换前的 md5 判重，跟服务端存的（转换后的）版本对不上，第 3 道判重形同虚设。
+        val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fitForUpload)
+        // 判重 3：md5 辅助键
+        if (existing.matchesAux(md5)) {
+            history.markSynced(SyncDirection.ONELAP_TO_IGP, rideStartMs, rideDistM)
+            return RideResult.Skipped(date, ride.name, ride.distanceKm, "已存在（md5）")
+        }
 
         // ★ IGPSPORT 没有独立的标题参数 —— **上传时的文件名就是活动标题**
         //   实测：传 `onelap_xxx.fit` → IGPSPORT 列表显示 `onelap_xxx`（去掉 .fit 后缀）
@@ -628,7 +665,15 @@ class SyncEngine(
         val fit = igp.downloadFit(act.rideId).getOrElse {
             return RideResult.Failed(date, name, km, "下载 FIT 失败: ${it.message}")
         }
-        val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fit)
+        // ★ 坐标系适配：IGPSPORT 里存量活动的坐标系**是混杂的**
+        //   - 迈金 / 顽鹿 App 原生上传 = GCJ-02
+        //   - Strava 官方同步过来 = WGS-84
+        //   - v1.2.3 起我们 App 上传的 = WGS-84
+        //   顽鹿底图按 GCJ-02 显示 ⇒ 探到 WGS-84 就转，探到 GCJ-02 就别动。
+        //   （想当然地统一转一次，会把本来就是 GCJ-02 的那批转歪 459m。）
+        val isWgsSource = isWgs84IgpActivity(act.name)
+        val fitOut = adaptCoordsToOnelap(fit, isWgsSource)
+        val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fitOut)
         // 判重 3：md5 辅助键
         if (existing.matchesAux(md5)) {
             history.markSynced(SyncDirection.IGP_TO_ONELAP, actStartMs, actDistM)
@@ -639,7 +684,7 @@ class SyncEngine(
         val titleForFile = act.name.ifBlank { genTitle }
         val safeTitle = titleForFile.replace(Regex("[\\/:*?\"<>|]"), "_").take(40)
         val fitName = if (safeTitle.isBlank()) "igp_${act.rideId}.fit" else "$safeTitle.fit"
-        onelap.uploadFit(fit, fitName).getOrElse {
+        onelap.uploadFit(fitOut, fitName).getOrElse {
             return RideResult.Failed(date, name, km, "上传失败: ${it.message}")
         }
         history.markSynced(SyncDirection.IGP_TO_ONELAP, actStartMs, actDistM)
@@ -683,10 +728,16 @@ class SyncEngine(
         val fit = igp.downloadFit(act.rideId).getOrElse {
             return RideResult.Failed(date, name, km, "下载 FIT 失败: ${it.message}")
         }
-        // 坐标系适配：IGPSPORT FIT 是 GCJ-02，行者底图是 WGS-84 —— 必须转（否则偏 459m）
+        // 坐标系适配：行者底图是 WGS-84 ⇒ 需要 WGS-84 的 FIT。
+        //
+        // ⚠️ IGPSPORT 里存量活动的坐标系**是混杂的**（迈金/顽鹿原生 = GCJ-02，
+        //    Strava 官方同步 = WGS-84，v1.2.3 起我们上传的 = WGS-84），
+        //    所以要先探测：已经是 WGS-84 的别再转（否则转歪 459m）。
+        //
         // 同时把 session/lap 的 sub_sport 从 virtual_activity 改成 generic，
         // 否则行者会显示成「虚拟骑行」而不是「骑行」。
-        val fitOut = adaptCoordsForXingzhe(fit)
+        val isWgsSource = isWgs84IgpActivity(act.name)
+        val fitOut = adaptCoordsToXingzhe(fit, isWgsSource)
         // md5 必须在转换之后算 —— 字节变了 md5 就变了
         val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fitOut)
         // 判重 3：md5 辅助键
@@ -770,7 +821,52 @@ internal const val ONELAP_PAGE_SIZE = 100
  * ⚠️ 别改小！2026-11-02 实测：用户要同步「2026-05-30」的数据，App 报「发现 0 条顽鹿记录」，
  * 因为「2026-05-30」在**第 6 页**（limit=20 时），而原来只翻 5 页 —— 刚好差一页漏掉。
  */
+/**
+ * 判断一条 IGPSPORT 活动的 FIT 是不是 **WGS-84** 坐标。
+ *
+ * IGPSPORT 服务端**原样存储**上传的 FIT（实测下载回来的 FIT 与源文件
+ * 4307 个坐标逐位相同，0.000m 偏移）—— 所以下游转换的依据是
+ * 「这条 FIT 当初是谁上传的」。
+ *
+ * | 来源 | title 形态 | FIT 坐标系 |
+ * |---|---|---|
+ * | 迈金 / 顽鹿 App 原生 | `Magene_C706_*.fit` / `MATCH_470592-*.fit` | **GCJ-02** |
+ * | Strava 官方同步 | `21696308938.fit`（纯数字） | WGS-84 |
+ * | 我们 App v1.2.3 起 | `2026-10-28 上午 西安 骑行` | **WGS-84** |
+ * | 我们 App v1.2.0-1.2.2 | `onelap_<rid>` | GCJ-02（当时没转） |
+ *
+ * ⚠️ **不要用「偏移量更小」来探测**（2026-11-03 实测行不通）：
+ * `gcj2wgs` 是 `wgs2gcj` 的近似逆运算，两个方向的偏移量只差 3% 左右，
+ * 迈金的 GCJ-02 数据会被判成 WGS-84 —— **10/10 全错**。
+ * 只能靠来源判定。
+ */
+internal fun isWgs84IgpActivity(title: String): Boolean {
+    val t = title.trim()
+    if (t.isEmpty()) return false
+    // 我们 v1.2.3 起上传的：标题是「日期 时段 城市 骑行」
+    if (OUR_IGP_TITLE_PATTERN.matches(t)) return true
+    // Strava 官方同步：纯数字 + .fit
+    if (STRAVA_IGP_TITLE_PATTERN.matches(t)) return true
+    // 其余（迈金 Magene_C706_*.fit / 顽鹿 MATCH_*.fit / onelap_<rid>）= GCJ-02
+    return false
+}
+
 internal const val ONELAP_MAX_PAGES = 30
+
+/**
+ * 我们 App v1.2.3 起上传到 IGPSPORT 的活动标题格式。
+ *
+ * 例：`2026-10-28 上午 西安 骑行`（日期 时段 城市 骑行）
+ */
+internal val OUR_IGP_TITLE_PATTERN =
+    Regex("""^\d{4}-\d{2}-\d{2}\s+(凌晨|上午|下午|晚上)\s+.+\s+骑行$""")
+
+/**
+ * Strava 官方同步到 IGPSPORT 的活动标题格式 —— 纯数字 + `.fit`。
+ *
+ * 例：`21696308938.fit`
+ */
+internal val STRAVA_IGP_TITLE_PATTERN = Regex("""^\d+\.fit$""")
 
 internal fun sameDay(timeStr: String, target: java.time.LocalDate): Boolean {
     if (timeStr.isBlank()) return false

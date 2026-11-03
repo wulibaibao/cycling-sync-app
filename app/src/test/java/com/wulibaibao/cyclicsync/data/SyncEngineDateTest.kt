@@ -130,4 +130,52 @@ class SyncEngineDateTest {
         // 但保守起见截到 40
         assertTrue(40 <= 50)
     }
+
+    // ---------- IGPSPORT 来源判定（2026-11-03）----------
+
+    /**
+     * IGPSPORT 服务端**原样存储**上传的 FIT（实测 4307 个坐标逐位相同），
+     * 所以下游转换的依据是「这条 FIT 当初是谁上传的」。
+     */
+    @Test
+    fun `我们v123的标题判为 WGS-84`() {
+        assertTrue(isWgs84IgpActivity("2026-05-30 上午 西安 骑行"))
+        assertTrue(isWgs84IgpActivity("2026-10-28 下午 青岛 骑行"))
+        assertTrue(isWgs84IgpActivity("2026-01-01 凌晨 上海 骑行"))
+        assertTrue(isWgs84IgpActivity("2026-12-31 晚上 深圳 骑行"))
+    }
+
+    @Test
+    fun `Strava数字名判为 WGS-84`() {
+        assertTrue(isWgs84IgpActivity("21696308938.fit"))
+        assertTrue(isWgs84IgpActivity("12345.fit"))
+    }
+
+    @Test
+    fun `迈金顽鹿原生判为 GCJ-02`() {
+        assertFalse(isWgs84IgpActivity("Magene_C706_1791238870_470592_1791239322351.fit"))
+        assertFalse(isWgs84IgpActivity("MATCH_470592-2026-10-29-06-00-38-log.fit"))
+        assertFalse(isWgs84IgpActivity("onelap_6ae7d3c09d25ac14d7b32d22"))
+        assertFalse(isWgs84IgpActivity("户外骑行"))
+        assertFalse(isWgs84IgpActivity(""))
+    }
+
+    /**
+     * ⚠️ **不能用「偏移量更小」探测坐标系**（2026-11-03 实测 10/10 全错）。
+     *
+     * `gcj2wgs` 是 `wgs2gcj` 的近似逆运算，两个方向的偏移量只差 3% 左右 ——
+     * 迈金的 GCJ-02 数据会被判成 WGS-84。只有来源判定可靠。
+     */
+    @Test
+    fun `偏移量探测法不可靠 只能靠来源`() {
+        // 西安的一个 GCJ-02 点
+        val gcj = doubleArrayOf(34.24610707908869, 108.84276425465941)
+        val asWgs = com.wulibaibao.cyclicsync.platform.CoordTransform.wgsToGcj(gcj[0], gcj[1])
+        val asGcj = com.wulibaibao.cyclicsync.platform.CoordTransform.gcjToWgs(gcj[0], gcj[1])
+        val offWgs = Math.hypot(asWgs[0] - gcj[0], asWgs[1] - gcj[1])
+        val offGcj = Math.hypot(asGcj[0] - gcj[0], asGcj[1] - gcj[1])
+        // 两个方向差不到 5% ⇒ 分辨不出来
+        val ratio = maxOf(offWgs, offGcj) / minOf(offWgs, offGcj)
+        assertTrue("两方向偏移量太接近，探测法不可靠", ratio < 1.05)
+    }
 }

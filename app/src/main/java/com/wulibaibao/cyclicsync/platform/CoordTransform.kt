@@ -9,13 +9,16 @@ import kotlin.math.sqrt
 /**
  * GCJ-02（火星坐标系）↔ WGS-84 转换。
  *
- * 国内平台坐标系约定（实测得出）：
- *  - 顽鹿 / 迈金 / IGPSPORT 存的 FIT 坐标是 **GCJ-02**
- *  - 行者（imxingzhe.com）底图按 **WGS-84** 显示
+ * 平台坐标系约定（实测得出）：
+ *  - 顽鹿 / 迈金 存的 FIT 坐标是 **GCJ-02**
+ *  - 行者（imxingzhe.com）底图按 **WGS-84** 显示 ⇒ 传行者要转成 WGS-84
+ *  - **IGPSPORT 收 WGS-84**（2026-11-03 拆它网页版 bundle 实测：底图是高德=GCJ-02，
+ *    但轨迹数据字段名 `wgs84TrackJsonPath` ⇒ 服务端统一存 WGS-84）⇒ 传 IGPSPORT 也要转
+ *  - 顽鹿 底图按 GCJ-02 ⇒ 传顽鹿要 GCJ-02
  *
- * 所以 顽鹿→行者、IGPSPORT→行者 必须做 GCJ-02 → WGS-84 转换，
- * 否则路线整体偏移 400-500m（实测 459m）。
- * 顽鹿→IGPSPORT **不转**（两边都是 GCJ-02，实测差 0.00m）。
+ * 所以 **IGPSPORT 里存量活动的坐标系是混杂的**（迈金/顽鹿原生 = GCJ-02，
+ * Strava 官方同步 = WGS-84，v1.2.3 起我们上传的 = WGS-84）——
+ * 下载 IGPSPORT 的 FIT 时要用 [detectCoordSystem] 探测，不能想当然。
  *
  * 算法来源：标准「火星坐标」转换公式，迭代求解（与 Python 侧 `correct_fit_gpx.py` 一致）。
  */
@@ -93,4 +96,46 @@ object CoordTransform {
         val a = sin(dp / 2) * sin(dp / 2) + cos(p1) * cos(p2) * sin(dl / 2) * sin(dl / 2)
         return 2 * r * asin(sqrt(a))
     }
+
+    /**
+     * 探测一组坐标的坐标系（采样投票法）。
+     *
+     * 移植自 Python 侧 `strava-to-onelap.py` 的 `detect_coord_system`。
+     *
+     * 原理：GCJ-02 偏移量随位置变化。对同一个点：
+     *  - 把它**当作 WGS-84** 正向转成 GCJ-02，看位移量 `offWgs`
+     *  - 把它**当作 GCJ-02** 反解成 WGS-84，看位移量 `offGcj`
+     * 真实坐标系下，这两个值不等；且真实的那一个**更小**。
+     * margin = (offGcj - offWgs) / max(offWgs, offGcj)
+     * margin > 0 ⇒ WGS-84，margin < 0 ⇒ GCJ-02。
+     *
+     * ⚠️ 方向别搞反 —— 早期版本反了，导致 10/10 全票判错。
+     *
+     * @param samples 坐标点（度）
+     * @return null = 无法判定（境外 / 样本不足 / 票数持平）
+     */
+    fun detectCoordSystem(samples: List<DoubleArray>): Boolean? {
+        val pts = samples.take(MAX_SAMPLES).filter { !isOutOfChina(it[0], it[1]) }
+        if (pts.isEmpty()) return null
+        var votesWgs = 0
+        var votesGcj = 0
+        for (p in pts) {
+            val lat = p[0]
+            val lon = p[1]
+            // 当作 WGS-84 → GCJ-02 的位移量
+            val asWgs = wgsToGcj(lat, lon)
+            val offWgs = Math.hypot(asWgs[0] - lat, asWgs[1] - lon)
+            // 当作 GCJ-02 → WGS-84 的位移量
+            val asGcj = gcjToWgs(lat, lon)
+            val offGcj = Math.hypot(asGcj[0] - lat, asGcj[1] - lon)
+            if (offGcj <= 0.0) continue
+            val margin = (offGcj - offWgs) / maxOf(abs(offWgs), abs(offGcj))
+            if (margin > 0) votesWgs++ else votesGcj++
+        }
+        if (votesWgs == votesGcj) return null
+        return votesWgs > votesGcj
+    }
+
+    /** 探测采样点数上限。 */
+    private const val MAX_SAMPLES = 10
 }
