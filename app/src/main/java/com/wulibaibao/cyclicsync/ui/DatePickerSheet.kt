@@ -49,7 +49,7 @@ import com.kizitonwose.calendar.core.CalendarDay
 import com.kizitonwose.calendar.core.DayPosition
 import com.kizitonwose.calendar.core.previousMonth
 import com.kizitonwose.calendar.core.nextMonth
-import kotlinx.coroutines.flow.filter
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import java.time.DayOfWeek
 import java.time.LocalDate
@@ -94,20 +94,27 @@ fun DatePickerSheet(
         firstDayOfWeek = DayOfWeek.MONDAY,
     )
 
-    // 当前显示的月份（跟着左右滑动走）
+    // 当前显示的月份（跟着左右滑动实时走）
     //
     // 横向分页日历里 `firstVisibleMonth` = `store[listState.firstVisibleItemIndex]`，
-    // 就是「当前停在的页」。但手指拖动时它会连续变化，标题栏会跟着闪，
-    // 所以只在滚动停下来（isScrollInProgress == false）之后才更新标题。
+    // 也就是「第一个可见的页」。但拖动过程中它会先跳到新页，导致标题提前变。
     //
-    // 点箭头时自己先改 visibleMonth（立即反馈），滚动结束后再被校正 —— 两者不打架。
+    // 用 `layoutInfo.visibleMonthsInfo` 取「离屏幕中心最近」的那一页 ——
+    // 横向分页时一页占满屏幕，所以中心页就是当前正在看的那页，
+    // 滑动过程中标题也平滑跟随。
+    //
+    // 点箭头时先自己改 visibleMonth（立即反馈），随后被 layoutInfo 校正。
     var visibleMonth by remember { mutableStateOf(YearMonth.from(selected)) }
     LaunchedEffect(state) {
-        snapshotFlow { state.isScrollInProgress }
-            .filter { !it }
-            .collect {
-                visibleMonth = state.firstVisibleMonth.yearMonth
-            }
+        snapshotFlow {
+            val viewportCenter = (state.layoutInfo.viewportStartOffset +
+                state.layoutInfo.viewportEndOffset) / 2
+            state.layoutInfo.visibleMonthsInfo.minByOrNull {
+                kotlin.math.abs(it.offset + it.size / 2 - viewportCenter)
+            }?.month?.yearMonth
+        }
+            .filterNotNull()
+            .collect { visibleMonth = it }
     }
 
     ModalBottomSheet(
@@ -252,6 +259,10 @@ private fun DayCell(
     enabled: Boolean,
     onClick: () -> Unit,
 ) {
+    // ⚠️ 必须区分两种「不是本月的格子」，否则用户分不清归属：
+    //   InDate  = 上个月末尾那几天（本月 1 号是周一时，月初那格是上月的）
+    //   OutDate = 下个月开头那几天
+    // 两者都不可点，但**视觉上和本月一样**，看着就像本月日期。
     val inMonth = day.position == DayPosition.MonthDate
     val clickable = inMonth && enabled
 
@@ -277,11 +288,16 @@ private fun DayCell(
         Text(
             text = day.date.dayOfMonth.toString(),
             style = MaterialTheme.typography.bodyMedium,
-            fontWeight = if (selected || isToday) FontWeight.Bold else FontWeight.Normal,
+            fontWeight = when {
+                selected || isToday -> FontWeight.Bold
+                !inMonth -> FontWeight.Light   // 邻月：字更细
+                else -> FontWeight.Normal
+            },
             color = when {
                 selected -> MaterialTheme.colorScheme.onPrimary
-                !enabled -> MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f)
-                else -> MaterialTheme.colorScheme.onSurface
+                else -> MaterialTheme.colorScheme.onSurface.copy(
+                    alpha = dayCellAlpha(inMonth, enabled)
+                )
             },
         )
     }
@@ -295,6 +311,23 @@ private fun DayCell(
  */
 internal fun datePickerRange(today: LocalDate, monthsBack: Long = 60): Pair<YearMonth, YearMonth> =
     YearMonth.from(today).minusMonths(monthsBack) to YearMonth.from(today)
+
+/**
+ * 日期格子的文字透明度。
+ *
+ * 三档，从深到浅，一眼能分出：
+ * - 本月且可选 → 1.0（正常）
+ * - 本月但在���来 → 0.38（次一级）
+ * - 邻月（InDate/OutDate）→ 0.25（明显淡出）
+ *
+ * 邻月最淡，因为它们最容易和本月日期混淆 ——
+ * 「26 27 28 29 30 31 1」这行里，前 6 个是上月、最后 1 个是下月。
+ */
+internal fun dayCellAlpha(inMonth: Boolean, enabled: Boolean): Float = when {
+    !inMonth -> 0.25f
+    !enabled -> 0.38f
+    else -> 1.0f
+}
 
 /** 该日期是否可选（不能选未来）。 */
 internal fun isDateSelectable(date: LocalDate, today: LocalDate): Boolean = !date.isAfter(today)

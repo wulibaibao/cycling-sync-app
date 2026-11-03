@@ -31,4 +31,21 @@ class DatePickerSheetTest {
     fun `星期头周一开头`() {
         assertEquals(listOf("一", "二", "三", "四", "五", "六", "日"), weekHeaderLabels())
     }
+
+    @Test
+    fun `邻月日期比本月日期淡得多`() {
+        val inMonth = dayCellAlpha(inMonth = true, enabled = true)
+        val adjacent = dayCellAlpha(inMonth = false, enabled = true)
+        assertEquals(1.0f, inMonth, 0.001f)
+        // 邻月必须明显更淡 —— 这是用户区分「本月」和「邻月」的唯一视觉线索
+        assertTrue("邻月 alpha $adjacent 应该远小于本月 $inMonth", adjacent < inMonth / 2)
+    }
+
+    @Test
+    fun `未来的本月日期比邻月稍明显`() {
+        val future = dayCellAlpha(inMonth = true, enabled = false)
+        val adjacent = dayCellAlpha(inMonth = false, enabled = true)
+        assertTrue("未来本月 $future 应该比邻月 $adjacent 明显", future > adjacent)
+        assertTrue(future < 1.0f)
+    }
 }
