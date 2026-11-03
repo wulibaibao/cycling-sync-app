@@ -125,3 +125,15 @@ private fun LogsScreenPreview() {
         )
     }
 }
+
+@Preview(name = "日期选择", showBackground = true)
+@Composable
+private fun DatePickerSheetPreview() {
+    CyclingSyncTheme {
+        DatePickerSheet(
+            selected = LocalDate.of(2026, 11, 1),
+            onDateSelected = {},
+            onDismiss = {},
+        )
+    }
+}

@@ -11,10 +11,7 @@ import androidx.compose.material.icons.rounded.ListAlt
 import androidx.compose.material.icons.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.rounded.CalendarToday
-import androidx.compose.material3.DatePicker
-import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.TextButton
 import java.time.Instant
 import java.time.LocalDate
@@ -1072,41 +1069,13 @@ fun SyncScreen(
         Spacer(Modifier.height(16.dp))
     }
 
-    // 日期选择对话框 —— 可以直接跳到任意一天
+    // 日期选择 —— 底部弹层月历（替代 Material3 的 DatePickerDialog）
     if (showDatePicker) {
-        val today = LocalDate.now()
-        val initialMillis = date.atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
-        val pickerState = rememberDatePickerState(
-            initialSelectedDateMillis = initialMillis,
-            selectableDates = object : androidx.compose.material3.SelectableDates {
-                // 不能选未来
-                override fun isSelectableDate(utcTimeMillis: Long): Boolean {
-                    val d = Instant.ofEpochMilli(utcTimeMillis)
-                        .atZone(ZoneOffset.UTC).toLocalDate()
-                    return !d.isAfter(today)
-                }
-
-                override fun isSelectableYear(year: Int): Boolean = year <= today.year
-            },
+        DatePickerSheet(
+            selected = date,
+            onDateSelected = onDateChange,
+            onDismiss = { showDatePicker = false },
         )
-        DatePickerDialog(
-            onDismissRequest = { showDatePicker = false },
-            confirmButton = {
-                TextButton(onClick = {
-                    pickerState.selectedDateMillis?.let { ms ->
-                        val picked = Instant.ofEpochMilli(ms)
-                            .atZone(ZoneOffset.UTC).toLocalDate()
-                        onDateChange(picked)
-                    }
-                    showDatePicker = false
-                }) { Text("确定") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDatePicker = false }) { Text("取消") }
-            },
-        ) {
-            DatePicker(state = pickerState)
-        }
     }
 }
 

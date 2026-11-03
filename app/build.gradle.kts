@@ -51,8 +51,8 @@ android {
         applicationId = "com.wulibaibao.cyclicsync"
         minSdk = 24
         targetSdk = 35
-        versionCode = 9
-        versionName = "1.2.6"
+        versionCode = 10
+        versionName = "1.3.0"
         resourceConfigurations += listOf("zh", "en")
 
     }
@@ -156,6 +156,9 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
     implementation("androidx.compose.ui:ui:1.7.6")
     implementation("androidx.compose.material3:material3:1.4.0")
+    // 日期选择器 —— 可定制月历
+    // 2.5.2 是最后一个用 kotlin-stdlib 1.9.x 的版本（2.6+ 要 Kotlin 2.0/2.1）
+    implementation("com.kizitonwose.calendar:compose:2.5.2")
     implementation("androidx.compose.material:material-icons-extended:1.7.6")
     // debug-only：@Preview 注解 + 离线渲染（android preview render），不进 release 包
     debugImplementation("androidx.compose.ui:ui-tooling-preview:1.7.6")
