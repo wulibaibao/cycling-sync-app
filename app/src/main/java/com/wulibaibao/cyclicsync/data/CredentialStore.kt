@@ -149,6 +149,30 @@ class CredentialStore(context: Context) {
         PlatformAccount()
     }
 
+    private fun saveSync(account: PlatformAccount) {
+        try {
+            val json = buildJsonObject {
+                put("onelap_account", JsonPrimitive(account.onelapAccount))
+                put("onelap_password", JsonPrimitive(account.onelapPassword))
+                put("igp_phone", JsonPrimitive(account.igpPhone))
+                put("igp_account", JsonPrimitive(account.igpAccount))
+                put("igp_password", JsonPrimitive(account.igpPassword))
+                put("igp_token", JsonPrimitive(account.igpToken))
+                put("igp_refresh_token", JsonPrimitive(account.igpRefreshToken))
+                put("igp_expires_at", JsonPrimitive(account.igpExpiresAt))
+                put("xz_account", JsonPrimitive(account.xingzheAccount))
+                put("xz_password", JsonPrimitive(account.xingzhePassword))
+                put("xz_session_id", JsonPrimitive(account.xingzheSessionId))
+                put("xz_username", JsonPrimitive(account.xingzheUsername))
+                put("xz_user_id", JsonPrimitive(account.xingzheUserId))
+                put("xz_enuid", JsonPrimitive(account.xingzheEnuid))
+                put("xz_mobile", JsonPrimitive(account.xingzheMobile))
+            }.toString()
+            val enc = encrypt(json)
+            prefs.edit().putString(PAYLOAD, enc).apply()
+        } catch (_: Exception) {}
+    }
+
     /**
      * 外部备份文件路径。
      *

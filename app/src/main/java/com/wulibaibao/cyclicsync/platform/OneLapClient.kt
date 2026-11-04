@@ -149,13 +149,24 @@ internal class OneLapClient {
         val rides = mutableListOf<OneLapRide>()
         (list as? kotlinx.serialization.json.JsonArray)?.forEach { el ->
             val o = el.jsonObject
+            val dist = o["distance_km"]?.jsonPrimitive?.content?.toDoubleOrNull()
+                ?: o["distanceKm"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0
+            val dur = o["ride_time"]?.jsonPrimitive?.content?.toLongOrNull()
+                ?: o["duration"]?.jsonPrimitive?.content?.toLongOrNull()
+                ?: o["time_spend"]?.jsonPrimitive?.content?.toLongOrNull()
+                ?: o["totalTime"]?.jsonPrimitive?.content?.toLongOrNull()
+                ?: 0L
+            val spd = o["average_speed"]?.jsonPrimitive?.content?.toDoubleOrNull()
+                ?: o["avgSpeed"]?.jsonPrimitive?.content?.toDoubleOrNull()
+                ?: if (dur > 0) Math.round((dist / (dur / 3600.0)) * 10.0) / 10.0 else 0.0
             rides += OneLapRide(
                 id = o["id"]?.jsonPrimitive?.content ?: o["recordId"]?.jsonPrimitive?.content ?: "",
                 name = o["name"]?.jsonPrimitive?.content ?: o["title"]?.jsonPrimitive?.content ?: "",
                 startTime = o["start_riding_time"]?.jsonPrimitive?.content
                     ?: o["startRidingTime"]?.jsonPrimitive?.content ?: "",
-                distanceKm = o["distance_km"]?.jsonPrimitive?.content?.toDoubleOrNull()
-                    ?: o["distanceKm"]?.jsonPrimitive?.content?.toDoubleOrNull() ?: 0.0,
+                distanceKm = dist,
+                durationSec = dur,
+                avgSpeedKmH = spd,
             )
         }
         return Result.success(rides)
@@ -282,4 +293,6 @@ internal data class OneLapRide(
     val name: String,
     val startTime: String,
     val distanceKm: Double,
+    val durationSec: Long = 0L,
+    val avgSpeedKmH: Double = 0.0,
 )

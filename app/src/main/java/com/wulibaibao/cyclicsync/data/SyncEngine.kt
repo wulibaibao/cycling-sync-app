@@ -64,6 +64,7 @@ sealed class SyncEvent {
         val status: String,
         /** 完整错误信息（失败时才有）—— 供复制用 */
         val errorDetail: String = "",
+        val activityId: String = "",
     ) : SyncEvent()
     data class Summary(
         val direction: SyncDirection,
@@ -84,42 +85,72 @@ sealed class SyncEvent {
  */
 class SyncEngine(
     private val account: PlatformAccount,
+    private val context: android.content.Context,
 ) {
 
     private val onelap = OneLapClient()
     private val igp = IgpClient()
     private val xingzhe = XingzheClient()
 
+    val ledger = SyncLedgerStore(context)
+    private val store = CredentialStore(context)
     private var onelapLoggedIn = false
     private var igpReady = false
     private var xzReady = false
 
-    /** 登录所有已配置的平台，返回错误信息（null=全成功） */
-    suspend fun loginAll(): String? {
-        if (account.onelapConfigured) {
+    /** 登录所需（或所有已配置）的平台，返回错误信息（null=成功） */
+    suspend fun loginAll(required: Set<Platform> = emptySet()): String? {
+        val errors = mutableMapOf<Platform, String>()
+        if (account.onelapConfigured && (required.isEmpty() || Platform.ONELAP in required)) {
             onelap.login(account.onelapAccount, account.onelapPassword)
                 .onSuccess { onelapLoggedIn = true }
-                .onFailure { return "顽鹿登录失败: ${it.message}" }
+                .onFailure {
+                    onelapLoggedIn = false
+                    errors[Platform.ONELAP] = "顽鹿登录失败: ${it.message}"
+                }
         }
-        if (account.igpConfigured) {
+        if (account.igpConfigured && (required.isEmpty() || Platform.IGP in required)) {
             igp.token = account.igpToken
             igp.refreshToken = account.igpRefreshToken
             igp.expiresAt = account.igpExpiresAt
             igp.ensureToken()
-                .onSuccess { igpReady = true }
-                .onFailure { return "IGPSPORT 登录失败: ${it.message}" }
+                .onSuccess {
+                    igpReady = true
+                    if (igp.token != account.igpToken || igp.refreshToken != account.igpRefreshToken) {
+                        store.save(
+                            account.copy(
+                                igpToken = igp.token,
+                                igpRefreshToken = igp.refreshToken,
+                                igpExpiresAt = igp.expiresAt,
+                            ),
+                        )
+                    }
+                }
+                .onFailure {
+                    igpReady = false
+                    errors[Platform.IGP] = "IGPSPORT 登录失败: ${it.message}"
+                }
         }
-        if (account.xingzheConfigured) {
+        if (account.xingzheConfigured && (required.isEmpty() || Platform.XINGZHE in required)) {
             xingzhe.sessionId = account.xingzheSessionId
             xingzhe.username = account.xingzheUsername
             xingzhe.userId = account.xingzheUserId
             xingzhe.enuid = account.xingzheEnuid
-            // session 有效性靠实际请求判断 —— 先探一次活动列表
             val probe = xingzhe.listPrivateWorkouts(offset = 0, limit = 1)
             if (probe.isFailure) {
-                return "行者登录已失效: ${probe.exceptionOrNull()?.message}"
+                xzReady = false
+                errors[Platform.XINGZHE] = "行者登录已失效: ${probe.exceptionOrNull()?.message}"
+            } else {
+                xzReady = true
             }
-            xzReady = true
+        }
+
+        for (p in required) {
+            val err = errors[p]
+            if (err != null) return err
+        }
+        if (required.isEmpty() && errors.isNotEmpty() && !onelapLoggedIn && !igpReady && !xzReady) {
+            return errors.values.firstOrNull()
         }
         return null
     }
@@ -300,6 +331,297 @@ class SyncEngine(
         emit(SyncEvent.Done(totalUploaded, totalSkipped, totalFailed))
     }
 
+    // ---------------------------------------------------------- 商业化活动看板与批量流式拉取
+
+    suspend fun fetchActivities(
+        source: com.wulibaibao.cyclicsync.ui.Platform,
+        page: Int = 1,
+        pageSize: Int = 20,
+    ): Result<List<UnifiedActivity>> {
+        val err = loginAll(required = setOf(source))
+        if (err != null) return Result.failure(Exception(err))
+        ledger.load()
+
+        val xingzheIdx = if (xzReady) {
+            runCatching { fetchXingzheExisting() }.getOrNull() ?: DedupIndex()
+        } else DedupIndex()
+
+        return when (source) {
+            com.wulibaibao.cyclicsync.ui.Platform.IGP -> {
+                if (!igpReady) return Result.failure(Exception("IGPSPORT 未登录"))
+                val onelapIdx = if (onelapLoggedIn) {
+                    runCatching { fetchOnelapExisting() }.getOrNull() ?: DedupIndex()
+                } else DedupIndex()
+
+                igp.listActivities(pageNo = page, pageSize = pageSize).map { list ->
+                    list.map { a ->
+                        val startMs = DedupIndex.parseTime(a.startTime) ?: 0L
+                        val km = Math.round((a.distanceM / 1000.0) * 100.0) / 100.0
+                        val dur = a.durationSec
+                        val spd = if (dur > 0) Math.round((km / (dur / 3600.0)) * 10.0) / 10.0 else 0.0
+
+                        // 目标 1：行者状态判定
+                        var xzState = ledger.getTargetStatus(com.wulibaibao.cyclicsync.ui.Platform.IGP, a.rideId, startMs, a.distanceM, com.wulibaibao.cyclicsync.ui.Platform.XINGZHE)
+                        if (xzState.status != ActivitySyncStatus.SYNCED) {
+                            if (xingzheIdx.matchesAux(a.rideId) ||
+                                xingzheIdx.matchesAux("igp_${a.rideId}.fit") ||
+                                xingzheIdx.matchesDateDist(a.startTime, a.distanceM) ||
+                                (if (a.dateOnly) xingzheIdx.matchesSameDay(startMs, a.distanceM) else xingzheIdx.matchesFingerprint(startMs, a.distanceM))
+                            ) {
+                                xzState = TargetSyncState(ActivitySyncStatus.SYNCED, System.currentTimeMillis())
+                                ledger.recordSync(com.wulibaibao.cyclicsync.ui.Platform.IGP, a.rideId, startMs, a.distanceM, com.wulibaibao.cyclicsync.ui.Platform.XINGZHE, ActivitySyncStatus.SYNCED)
+                            }
+                        }
+
+                        // 目标 2：顽鹿状态判定
+                        var onelapState = ledger.getTargetStatus(com.wulibaibao.cyclicsync.ui.Platform.IGP, a.rideId, startMs, a.distanceM, com.wulibaibao.cyclicsync.ui.Platform.ONELAP)
+                        if (onelapState.status != ActivitySyncStatus.SYNCED) {
+                            if (onelapIdx.matchesAux(a.rideId) ||
+                                onelapIdx.matchesAux("igp_${a.rideId}.fit") ||
+                                onelapIdx.matchesDateDist(a.startTime, a.distanceM) ||
+                                (if (a.dateOnly) onelapIdx.matchesSameDay(startMs, a.distanceM) else onelapIdx.matchesFingerprint(startMs, a.distanceM))
+                            ) {
+                                onelapState = TargetSyncState(ActivitySyncStatus.SYNCED, System.currentTimeMillis())
+                                ledger.recordSync(com.wulibaibao.cyclicsync.ui.Platform.IGP, a.rideId, startMs, a.distanceM, com.wulibaibao.cyclicsync.ui.Platform.ONELAP, ActivitySyncStatus.SYNCED)
+                            }
+                        }
+
+                        val targetMap = mutableMapOf(com.wulibaibao.cyclicsync.ui.Platform.XINGZHE to xzState)
+                        if (account.onelapConfigured) {
+                            targetMap[com.wulibaibao.cyclicsync.ui.Platform.ONELAP] = onelapState
+                        }
+
+                        UnifiedActivity(
+                            id = a.rideId,
+                            source = com.wulibaibao.cyclicsync.ui.Platform.IGP,
+                            title = a.name.ifBlank { "骑行 $km km" },
+                            startTimeRaw = a.startTime,
+                            startTimeMs = startMs,
+                            distanceKm = km,
+                            durationSec = dur,
+                            speedKmH = spd,
+                            hasPower = false,
+                            hasCadence = false,
+                            hasHr = false,
+                            targetStates = targetMap,
+                            selected = targetMap.values.any { it.status != ActivitySyncStatus.SYNCED },
+                        )
+                    }
+                }
+            }
+            com.wulibaibao.cyclicsync.ui.Platform.ONELAP -> {
+                if (!onelapLoggedIn) return Result.failure(Exception("顽鹿未登录"))
+                val igpIdx = if (igpReady) {
+                    runCatching { fetchIgpExisting() }.getOrNull() ?: DedupIndex()
+                } else DedupIndex()
+
+                onelap.listRides(page = page, limit = pageSize).map { list ->
+                    list.map { r ->
+                        val startMs = DedupIndex.parseTime(r.startTime) ?: 0L
+                        val km = Math.round(r.distanceKm * 100.0) / 100.0
+                        val dur = r.durationSec
+                        val spd = r.avgSpeedKmH
+
+                        // 目标 1：行者状态判定
+                        var xzState = ledger.getTargetStatus(com.wulibaibao.cyclicsync.ui.Platform.ONELAP, r.id, startMs, km * 1000.0, com.wulibaibao.cyclicsync.ui.Platform.XINGZHE)
+                        if (xzState.status != ActivitySyncStatus.SYNCED) {
+                            if (xingzheIdx.matchesAux(r.id) ||
+                                xingzheIdx.matchesAux("onelap_${r.id}.fit") ||
+                                xingzheIdx.matchesDateDist(r.startTime, km * 1000.0) ||
+                                xingzheIdx.matchesFingerprint(startMs, km * 1000.0)
+                            ) {
+                                xzState = TargetSyncState(ActivitySyncStatus.SYNCED, System.currentTimeMillis())
+                                ledger.recordSync(com.wulibaibao.cyclicsync.ui.Platform.ONELAP, r.id, startMs, km * 1000.0, com.wulibaibao.cyclicsync.ui.Platform.XINGZHE, ActivitySyncStatus.SYNCED)
+                            }
+                        }
+
+                        // 目标 2：迹驰状态判定
+                        var igpState = ledger.getTargetStatus(com.wulibaibao.cyclicsync.ui.Platform.ONELAP, r.id, startMs, km * 1000.0, com.wulibaibao.cyclicsync.ui.Platform.IGP)
+                        if (igpState.status != ActivitySyncStatus.SYNCED) {
+                            if (igpIdx.matchesAux(r.id) ||
+                                igpIdx.matchesAux("onelap_${r.id}.fit") ||
+                                igpIdx.matchesDateDist(r.startTime, km * 1000.0) ||
+                                igpIdx.matchesFingerprint(startMs, km * 1000.0)
+                            ) {
+                                igpState = TargetSyncState(ActivitySyncStatus.SYNCED, System.currentTimeMillis())
+                                ledger.recordSync(com.wulibaibao.cyclicsync.ui.Platform.ONELAP, r.id, startMs, km * 1000.0, com.wulibaibao.cyclicsync.ui.Platform.IGP, ActivitySyncStatus.SYNCED)
+                            }
+                        }
+
+                        val targetMap = mutableMapOf(com.wulibaibao.cyclicsync.ui.Platform.XINGZHE to xzState)
+                        if (account.igpConfigured) {
+                            targetMap[com.wulibaibao.cyclicsync.ui.Platform.IGP] = igpState
+                        }
+
+                        UnifiedActivity(
+                            id = r.id,
+                            source = com.wulibaibao.cyclicsync.ui.Platform.ONELAP,
+                            title = r.name.ifBlank { "骑行 $km km" },
+                            startTimeRaw = r.startTime,
+                            startTimeMs = startMs,
+                            distanceKm = km,
+                            durationSec = dur,
+                            speedKmH = spd,
+                            hasPower = true,
+                            hasCadence = true,
+                            hasHr = false,
+                            targetStates = targetMap,
+                            selected = targetMap.values.any { it.status != ActivitySyncStatus.SYNCED },
+                        )
+                    }
+                }
+            }
+            com.wulibaibao.cyclicsync.ui.Platform.XINGZHE -> Result.success(emptyList())
+        }
+    }
+
+    /** 全部历史分批流式加载：按页迭代，页间保护性延时 250ms */
+    fun streamAllActivities(
+        source: com.wulibaibao.cyclicsync.ui.Platform,
+        maxPages: Int = 10,
+        delayPerBatchMs: Long = 250L,
+    ): Flow<List<UnifiedActivity>> = flow {
+        for (p in 1..maxPages) {
+            val res = fetchActivities(source, page = p, pageSize = 20)
+            if (res.isFailure) break
+            val list = res.getOrThrow()
+            if (list.isEmpty()) break
+            emit(list)
+            if (list.size < 20) break
+            kotlinx.coroutines.delay(delayPerBatchMs)
+        }
+    }
+
+    suspend fun syncUnifiedActivity(
+        act: UnifiedActivity,
+        target: com.wulibaibao.cyclicsync.ui.Platform,
+    ): RideResult {
+        ledger.load()
+        return when {
+            act.source == com.wulibaibao.cyclicsync.ui.Platform.IGP && target == com.wulibaibao.cyclicsync.ui.Platform.XINGZHE -> {
+                val existing = fetchXingzheExisting()
+                val igpAct = com.wulibaibao.cyclicsync.platform.IgpActivity(
+                    rideId = act.id,
+                    name = act.title,
+                    startTime = act.startTimeRaw,
+                    distanceM = act.distanceKm * 1000.0,
+                    durationSec = act.durationSec,
+                    dataStatus = 0,
+                )
+                val res = processIgpToXingzhe(igpAct, existing)
+                when (res) {
+                    is RideResult.Uploaded -> ledger.recordSync(com.wulibaibao.cyclicsync.ui.Platform.IGP, act.id, act.startTimeMs, act.distanceKm * 1000.0, com.wulibaibao.cyclicsync.ui.Platform.XINGZHE, ActivitySyncStatus.SYNCED)
+                    is RideResult.Skipped -> ledger.recordSync(com.wulibaibao.cyclicsync.ui.Platform.IGP, act.id, act.startTimeMs, act.distanceKm * 1000.0, com.wulibaibao.cyclicsync.ui.Platform.XINGZHE, ActivitySyncStatus.SYNCED)
+                    is RideResult.Failed -> ledger.recordSync(com.wulibaibao.cyclicsync.ui.Platform.IGP, act.id, act.startTimeMs, act.distanceKm * 1000.0, com.wulibaibao.cyclicsync.ui.Platform.XINGZHE, ActivitySyncStatus.FAILED, error = res.reason)
+                }
+                res
+            }
+            act.source == com.wulibaibao.cyclicsync.ui.Platform.ONELAP && target == com.wulibaibao.cyclicsync.ui.Platform.XINGZHE -> {
+                val existing = fetchXingzheExisting()
+                val oneLapRide = com.wulibaibao.cyclicsync.platform.OneLapRide(
+                    id = act.id,
+                    name = act.title,
+                    startTime = act.startTimeRaw,
+                    distanceKm = act.distanceKm,
+                )
+                val res = processRideToXingzhe(oneLapRide, existing)
+                when (res) {
+                    is RideResult.Uploaded -> ledger.recordSync(com.wulibaibao.cyclicsync.ui.Platform.ONELAP, act.id, act.startTimeMs, act.distanceKm * 1000.0, com.wulibaibao.cyclicsync.ui.Platform.XINGZHE, ActivitySyncStatus.SYNCED)
+                    is RideResult.Skipped -> ledger.recordSync(com.wulibaibao.cyclicsync.ui.Platform.ONELAP, act.id, act.startTimeMs, act.distanceKm * 1000.0, com.wulibaibao.cyclicsync.ui.Platform.XINGZHE, ActivitySyncStatus.SYNCED)
+                    is RideResult.Failed -> ledger.recordSync(com.wulibaibao.cyclicsync.ui.Platform.ONELAP, act.id, act.startTimeMs, act.distanceKm * 1000.0, com.wulibaibao.cyclicsync.ui.Platform.XINGZHE, ActivitySyncStatus.FAILED, error = res.reason)
+                }
+                res
+            }
+            act.source == com.wulibaibao.cyclicsync.ui.Platform.ONELAP && target == com.wulibaibao.cyclicsync.ui.Platform.IGP -> {
+                val existing = fetchIgpExisting()
+                val oneLapRide = com.wulibaibao.cyclicsync.platform.OneLapRide(
+                    id = act.id,
+                    name = act.title,
+                    startTime = act.startTimeRaw,
+                    distanceKm = act.distanceKm,
+                )
+                val res = processRideToIgp(oneLapRide, existing)
+                when (res) {
+                    is RideResult.Uploaded -> ledger.recordSync(com.wulibaibao.cyclicsync.ui.Platform.ONELAP, act.id, act.startTimeMs, act.distanceKm * 1000.0, com.wulibaibao.cyclicsync.ui.Platform.IGP, ActivitySyncStatus.SYNCED)
+                    is RideResult.Skipped -> ledger.recordSync(com.wulibaibao.cyclicsync.ui.Platform.ONELAP, act.id, act.startTimeMs, act.distanceKm * 1000.0, com.wulibaibao.cyclicsync.ui.Platform.IGP, ActivitySyncStatus.SYNCED)
+                    is RideResult.Failed -> ledger.recordSync(com.wulibaibao.cyclicsync.ui.Platform.ONELAP, act.id, act.startTimeMs, act.distanceKm * 1000.0, com.wulibaibao.cyclicsync.ui.Platform.IGP, ActivitySyncStatus.FAILED, error = res.reason)
+                }
+                res
+            }
+            act.source == com.wulibaibao.cyclicsync.ui.Platform.IGP && target == com.wulibaibao.cyclicsync.ui.Platform.ONELAP -> {
+                val existing = fetchOnelapExisting()
+                val igpAct = com.wulibaibao.cyclicsync.platform.IgpActivity(
+                    rideId = act.id,
+                    name = act.title,
+                    startTime = act.startTimeRaw,
+                    distanceM = act.distanceKm * 1000.0,
+                    durationSec = act.durationSec,
+                    dataStatus = 0,
+                )
+                val res = processIgpToOnelap(igpAct, existing)
+                when (res) {
+                    is RideResult.Uploaded -> ledger.recordSync(com.wulibaibao.cyclicsync.ui.Platform.IGP, act.id, act.startTimeMs, act.distanceKm * 1000.0, com.wulibaibao.cyclicsync.ui.Platform.ONELAP, ActivitySyncStatus.SYNCED)
+                    is RideResult.Skipped -> ledger.recordSync(com.wulibaibao.cyclicsync.ui.Platform.IGP, act.id, act.startTimeMs, act.distanceKm * 1000.0, com.wulibaibao.cyclicsync.ui.Platform.ONELAP, ActivitySyncStatus.SYNCED)
+                    is RideResult.Failed -> ledger.recordSync(com.wulibaibao.cyclicsync.ui.Platform.IGP, act.id, act.startTimeMs, act.distanceKm * 1000.0, com.wulibaibao.cyclicsync.ui.Platform.ONELAP, ActivitySyncStatus.FAILED, error = res.reason)
+                }
+                res
+            }
+            else -> RideResult.Failed(act.formattedDate, act.title, act.distanceKm, "暂不支持此方向同步")
+        }
+    }
+
+    private fun resolveDirection(source: com.wulibaibao.cyclicsync.ui.Platform, target: com.wulibaibao.cyclicsync.ui.Platform): SyncDirection {
+        return when {
+            source == com.wulibaibao.cyclicsync.ui.Platform.IGP && target == com.wulibaibao.cyclicsync.ui.Platform.XINGZHE -> SyncDirection.IGP_TO_XINGZHE
+            source == com.wulibaibao.cyclicsync.ui.Platform.ONELAP && target == com.wulibaibao.cyclicsync.ui.Platform.XINGZHE -> SyncDirection.ONELAP_TO_XINGZHE
+            source == com.wulibaibao.cyclicsync.ui.Platform.ONELAP && target == com.wulibaibao.cyclicsync.ui.Platform.IGP -> SyncDirection.ONELAP_TO_IGP
+            source == com.wulibaibao.cyclicsync.ui.Platform.IGP && target == com.wulibaibao.cyclicsync.ui.Platform.ONELAP -> SyncDirection.IGP_TO_ONELAP
+            else -> SyncDirection.IGP_TO_XINGZHE
+        }
+    }
+
+    /** 批量同步多项活动（单队列串行 + 600ms 防限流延时） */
+    fun syncUnifiedBatch(
+        activities: List<UnifiedActivity>,
+        target: com.wulibaibao.cyclicsync.ui.Platform,
+    ): Flow<SyncEvent> = flow {
+        val required = setOf(target) + activities.map { it.source }
+        val err = loginAll(required = required)
+        if (err != null) {
+            emit(SyncEvent.Fatal(err))
+            return@flow
+        }
+        val defaultDir = resolveDirection(activities.firstOrNull()?.source ?: com.wulibaibao.cyclicsync.ui.Platform.IGP, target)
+        var up = 0
+        var skip = 0
+        var fail = 0
+        emit(SyncEvent.Step(defaultDir, "启动批量同步：已选 ${activities.size} 条记录 ➔ ${target.title}"))
+        for ((idx, act) in activities.withIndex()) {
+            val dir = resolveDirection(act.source, target)
+            emit(SyncEvent.Step(dir, "(${idx + 1}/${activities.size}) [${act.source.title}] ${act.title} (${act.distanceKm} km)..."))
+            val r = syncUnifiedActivity(act, target)
+            when (r) {
+                is RideResult.Uploaded -> {
+                    up++
+                    emit(SyncEvent.Ride(dir, r.date, r.name, r.distanceKm, "已上传", activityId = act.id))
+                }
+                is RideResult.Skipped -> {
+                    skip++
+                    emit(SyncEvent.Ride(dir, r.date, r.name, r.distanceKm, r.reason, activityId = act.id))
+                }
+                is RideResult.Failed -> {
+                    fail++
+                    emit(SyncEvent.Ride(dir, r.date, r.name, r.distanceKm, "失败", errorDetail = r.reason, activityId = act.id))
+                }
+            }
+            if (idx < activities.size - 1) {
+                kotlinx.coroutines.delay(600L)
+            }
+        }
+        emit(SyncEvent.Summary(defaultDir, up, skip, fail))
+        emit(SyncEvent.Done(up, skip, fail))
+    }
+
     // ---------------------------------------------------------- 内部实现
 
     private suspend fun fetchOnelapRides(
@@ -335,31 +657,51 @@ class SyncEngine(
         }
         return out
     }
-
     private suspend fun fetchXingzheExisting(): DedupIndex {
         val idx = DedupIndex()
         var offset = 0
         while (offset < 200) {
-            val batchRes = xingzhe.listPrivateWorkouts(offset = offset, limit = 20)
+            val batchRes = xingzhe.listPrivateWorkouts(offset = offset, limit = 50)
             if (batchRes.isFailure) break
             val batch = batchRes.getOrThrow()
             if (batch.isEmpty()) break
             batch.forEach { o ->
-                idx.addAux(o["md5"]?.toString()?.trim('"'))
-                idx.addAux(o["name"]?.toString()?.trim('"'))
+                val md5 = o["md5"]?.toString()?.trim('"')?.takeIf { it != "null" && it.isNotBlank() }
+                if (md5 != null) idx.addAux(md5)
+                val title = (o["title"]?.toString() ?: o["name"]?.toString())?.trim('"')?.takeIf { it != "null" && it.isNotBlank() }
+                if (title != null) {
+                    idx.addAux(title)
+                    val m = Regex("(?:igp|onelap)_([0-9a-zA-Z_-]+)").find(title)
+                    if (m != null) {
+                        idx.addAux(m.groupValues[1])
+                    }
+                }
                 // 指纹：开始时间 + 距离
-                val startMs = DedupIndex.parseTime(
-                    o["startTime"]?.toString()?.trim('"')
-                        ?: o["start_time"]?.toString()?.trim('"')
-                        ?: o["createTime"]?.toString()?.trim('"')
-                        ?: "",
-                )
-                val dist = o["distance"]?.toString()?.trim('"')?.toDoubleOrNull()
-                    ?: o["totalDistance"]?.toString()?.trim('"')?.toDoubleOrNull()
-                    ?: 0.0
-                if (startMs != null && dist > 0) idx.add(startMs, dist)
+                val rawTime = o["startTime"]?.toString()?.trim('"')
+                    ?: o["start_time"]?.toString()?.trim('"')
+                    ?: o["createTime"]?.toString()?.trim('"')
+                    ?: ""
+                val startMs = DedupIndex.parseTime(rawTime.takeIf { it != "null" } ?: "")
+                val distStr = (o["distance"]?.toString()?.trim('"')
+                    ?: o["totalDistance"]?.toString()?.trim('"'))?.takeIf { it != "null" }
+                val dist = distStr?.toDoubleOrNull() ?: 0.0
+                if (startMs != null && dist > 0) {
+                    idx.add(startMs, dist)
+                    val dateStr = java.time.Instant.ofEpochMilli(startMs)
+                        .atZone(java.time.ZoneId.of("Asia/Shanghai"))
+                        .toLocalDate()
+                        .toString()
+                    idx.addDateDist(dateStr, dist)
+                }
+                if (dist > 0 && title != null) {
+                    val dateM = Regex("(\\d{4}[-.]\\d{2}[-.]\\d{2})").find(title)
+                    if (dateM != null) {
+                        idx.addDateDist(dateM.groupValues[1], dist)
+                    }
+                }
             }
-            offset += 20
+            if (batch.size < 50) break
+            offset += batch.size
         }
         return idx
     }
@@ -370,7 +712,10 @@ class SyncEngine(
             idx.addAux(a.rideId)
             idx.addAux(a.name)
             val startMs = DedupIndex.parseTime(a.startTime)
-            if (startMs != null) idx.add(startMs, a.distanceM)
+            if (startMs != null) {
+                idx.add(startMs, a.distanceM)
+                idx.addDateDist(formatDate(a.startTime), a.distanceM)
+            }
         }
         return idx
     }
@@ -387,7 +732,10 @@ class SyncEngine(
                 idx.addAux(r.id)
                 idx.addAux(r.name)
                 val startMs = DedupIndex.parseTime(r.startTime)
-                if (startMs != null) idx.add(startMs, r.distanceKm * 1000.0)
+                if (startMs != null) {
+                    idx.add(startMs, r.distanceKm * 1000.0)
+                    idx.addDateDist(formatDate(r.startTime), r.distanceKm * 1000.0)
+                }
             }
             if (batch.size < 20) break
             page++
@@ -521,6 +869,12 @@ class SyncEngine(
         // 导致永远跳过、再也补不回来（2026-11-03 实测踩到）。
         if (existing.matchesFingerprint(rideStartMs, rideDistM)) {
             return RideResult.Skipped(date, ride.name, ride.distanceKm, "已存在（时间+距离匹配）")
+        }
+        // 判重 2.5：辅助键 / 日期+距离匹配
+        if (existing.matchesAux(ride.id) ||
+            existing.matchesAux("onelap_${ride.id}.fit") ||
+            existing.matchesDateDist(ride.startTime, rideDistM)) {
+            return RideResult.Skipped(date, ride.name, ride.distanceKm, "已存在（日期+里程/ID匹配）")
         }
         val fitKey = onelap.fetchDetail(ride.id).getOrElse {
             return RideResult.Failed(date, ride.name, ride.distanceKm, "取 FIT key 失败: ${it.message}")
@@ -702,6 +1056,12 @@ class SyncEngine(
                 if (act.dateOnly) "已存在（同日+距离匹配）" else "已存在（时间+距离匹配）",
             )
         }
+        // 判重 2.5：辅助键 / 日期+距离匹配（服务端历史记录）
+        if (existing.matchesAux(act.rideId) ||
+            existing.matchesAux("igp_${act.rideId}.fit") ||
+            existing.matchesDateDist(act.startTime, actDistM)) {
+            return RideResult.Skipped(date, name, km, "已存在（日期+里程/ID匹配）")
+        }
         val fit = igp.downloadFit(act.rideId).getOrElse {
             return RideResult.Failed(date, name, km, "下载 FIT 失败: ${it.message}")
         }
@@ -744,10 +1104,13 @@ class SyncEngine(
     }
 
     private fun formatDate(raw: String): String {
-        return try {
-            val ts = raw.toLongOrNull() ?: return raw.take(10)
-            SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(ts * 1000))
-        } catch (e: Exception) {
+        val ms = DedupIndex.parseTime(raw)
+        return if (ms != null) {
+            java.time.Instant.ofEpochMilli(ms)
+                .atZone(java.time.ZoneId.of("Asia/Shanghai"))
+                .toLocalDate()
+                .toString()
+        } else {
             raw.take(10)
         }
     }

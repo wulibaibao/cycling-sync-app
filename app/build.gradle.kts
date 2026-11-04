@@ -46,26 +46,35 @@ val generateKeysTask = tasks.register("generatePlatformKeys") {
 android {
     namespace = "com.wulibaibao.cyclicsync"
     compileSdk = 35
+    buildToolsVersion = "35.0.0"
 
     defaultConfig {
         applicationId = "com.wulibaibao.cyclicsync"
         minSdk = 24
         targetSdk = 35
-        versionCode = 14
-        versionName = "1.4.0"
+        versionCode = 20
+        versionName = "2.0"
         resourceConfigurations += listOf("zh", "en")
 
     }
 
     signingConfigs {
-        // 正式签名 —— 密钥库路径与口令从 local.properties 读取
         create("release") {
+            val defaultKs = file("release-keystore/cycling-sync-release.jks")
             val ksPath = localProps.getProperty("release.keystore.path")
             if (ksPath != null && file(ksPath).exists()) {
                 storeFile = file(ksPath)
                 storePassword = localProps.getProperty("release.keystore.storePassword")
                 keyAlias = localProps.getProperty("release.keystore.keyAlias")
                 keyPassword = localProps.getProperty("release.keystore.keyPassword")
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+            } else if (defaultKs.exists()) {
+                storeFile = defaultKs
+                storePassword = "cyclingSync2026"
+                keyAlias = "cyclingsync"
+                keyPassword = "cyclingSync2026"
                 // v1+v2+v3 全开 —— 部分国产 ROM 的安装器只认 v1 (JAR 签名)
                 enableV1Signing = true
                 enableV2Signing = true
@@ -86,9 +95,11 @@ android {
             )
             // ⚠️ debug 用**正式签名** —— 否则和 release 签名不同，
             // 互相覆盖安装会失败（系统报「应用未安装」，容易被误判成「闪退」）。
-            signingConfig = if (localProps.getProperty("release.keystore.path") != null &&
-                file(localProps.getProperty("release.keystore.path")).exists()
-            ) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
+            signingConfig = if (signingConfigs.getByName("release").storeFile?.exists() == true) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
         release {
             // ⚠️ 开启 R8 —— 不压缩时 dex 有 40MB+（material-icons-extended 占大头），
@@ -100,12 +111,15 @@ android {
                 "proguard-rules.pro",
             )
             // 配了正式签名就用正式的，否则退回 debug（保证本地能构建）
-            signingConfig = if (localProps.getProperty("release.keystore.path") != null &&
-                file(localProps.getProperty("release.keystore.path")).exists()
-            ) signingConfigs.getByName("release") else signingConfigs.getByName("debug")
+            signingConfig = if (signingConfigs.getByName("release").storeFile?.exists() == true) {
+                signingConfigs.getByName("release")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
     compileOptions {
+        isCoreLibraryDesugaringEnabled = true
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
         // ⚠️ minSdk 24 但代码用了 java.time（LocalDate 等）——

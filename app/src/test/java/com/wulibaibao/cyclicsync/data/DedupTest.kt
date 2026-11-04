@@ -97,6 +97,14 @@ class DedupTest {
     }
 
     @Test
+    fun `时间解析 —— 支持秒和毫秒时间戳`() {
+        val sec = DedupIndex.parseTime("1700000000")
+        val ms = DedupIndex.parseTime("1700000000000")
+        assertEquals(1700000000000L, sec)
+        assertEquals(1700000000000L, ms)
+    }
+
+    @Test
     fun `空索引任何东西都不命中`() {
         val idx = DedupIndex()
         assertFalse(idx.matchesFingerprint(base, 40_200.0))

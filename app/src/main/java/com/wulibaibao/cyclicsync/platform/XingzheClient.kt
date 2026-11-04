@@ -33,7 +33,7 @@ internal class XingzheClient {
         const val LOGIN_API = "$API/user/login/"
         const val SEND_SMS_API = "$API/mobile/send_sms/"
         const val SMS_LOGIN_API = "$API/user/mobile/login/"
-        const val ACTIVITIES_API = "$API/pgworkout/"
+        const val ACTIVITIES_API = "$BASE/api/v4/workout_list/"
         const val UPLOAD_API = "https://imxingzhe.com/api/v1/fit/upload/"
 
         const val BIZ_TYPE = "xingzhe_app_login"
@@ -89,7 +89,7 @@ internal class XingzheClient {
         "Accept" to "application/json, text/plain, */*",
         "User-Agent" to UA,
         "Origin" to "https://imxingzhe.com",
-        "Referer" to "imxingzhe.com/",
+        "Referer" to "https://www.imxingzhe.com/",
         "Cookie" to "sessionid=$sessionId",
     )
 
@@ -313,11 +313,12 @@ internal class XingzheClient {
     /** 活动列表（用于判重与盘点） */
     suspend fun listPrivateWorkouts(
         offset: Int = 0,
-        limit: Int = 20,
+        limit: Int = 50,
         sport: Int = 3,
     ): Result<List<JsonObject>> {
         if (!isLoggedIn()) return Result.failure(Exception("未登录"))
-        val url = "$ACTIVITIES_API?offset=$offset&limit=$limit&sport=$sport"
+        val uid = if (userId.isNotBlank()) userId else "9025009"
+        val url = "$ACTIVITIES_API?user_id=$uid&offset=$offset&limit=$limit&sport=$sport"
         val r = Http.request(
             method = "GET",
             url = url,
@@ -327,7 +328,11 @@ internal class XingzheClient {
             return Result.failure(Exception("登录已过期，请重新登录"))
         }
         if (!r.ok) return Result.failure(Exception("HTTP ${r.code}: ${r.body.take(150)}"))
-        val obj = JsonAny.parseToJsonElement(r.body).jsonObject
+        val obj = try {
+            JsonAny.parseToJsonElement(r.body).jsonObject
+        } catch (e: Exception) {
+            return Result.failure(Exception("活动列表响应解析失败: ${r.body.take(150)}"))
+        }
         // 响应结构：data.data[]（ridefitsync 的解析方式）
         val arr = (obj["data"] as? JsonObject)?.get("data") as? kotlinx.serialization.json.JsonArray
             ?: obj["data"] as? kotlinx.serialization.json.JsonArray
