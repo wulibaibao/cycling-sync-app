@@ -69,6 +69,8 @@ private fun SyncScreenPreview() {
             selected = setOf(SyncDirection.ONELAP_TO_XINGZHE, SyncDirection.IGP_TO_XINGZHE),
             states = previewStates,
             date = LocalDate.of(2026, 11, 1),
+            result = SyncResult.Success(uploaded = 3, skipped = 1, failed = 0),
+            onDismissResult = {},
             onDateChange = {},
             onToggle = {},
             onSync = {},
@@ -134,6 +136,26 @@ private fun DatePickerSheetPreview() {
             selected = LocalDate.of(2026, 11, 1),
             onDateSelected = {},
             onDismiss = {},
+        )
+    }
+}
+
+@Preview(name = "同步页 - 失败", showBackground = true)
+@Composable
+private fun SyncScreenFailedPreview() {
+    CyclingSyncTheme {
+        SyncScreen(
+            running = false,
+            selected = setOf(SyncDirection.ONELAP_TO_XINGZHE),
+            states = previewStates,
+            date = LocalDate.of(2026, 11, 1),
+            result = SyncResult.Failure("顽鹿登录失败: 账号或密码错误"),
+            onDismissResult = {},
+            onDateChange = {},
+            onToggle = {},
+            onSync = {},
+            onStop = {},
+            onOpenLogs = {},
         )
     }
 }

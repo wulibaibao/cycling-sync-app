@@ -42,7 +42,9 @@ import com.wulibaibao.cyclicsync.ui.PlatformListScreen
 import com.wulibaibao.cyclicsync.ui.PlatformState
 import com.wulibaibao.cyclicsync.ui.PlatformStatus
 import com.wulibaibao.cyclicsync.ui.PlatformStates
+import com.wulibaibao.cyclicsync.ui.SyncResult
 import com.wulibaibao.cyclicsync.ui.SyncScreen
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 /** 页面路由 */
@@ -126,6 +128,9 @@ class MainActivity : ComponentActivity() {
                 var running by remember { mutableStateOf(false) }
                 var job by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
                 val events = remember { mutableStateListOf<SyncEvent>() }
+
+    // 同步结果提示（成功/失败）—— 显示在同步页顶部，不用点进日志页才知道结果
+    var syncResult by remember { mutableStateOf<SyncResult?>(null) }
                 // 恢复上次的日志 —— 否则 App 被杀掉后日志就没了
                 LaunchedEffect(Unit) {
                     try {
@@ -317,6 +322,8 @@ class MainActivity : ComponentActivity() {
                                 selected = selected,
                                 states = states,
                                 date = syncDate,
+                                result = syncResult,
+                                onDismissResult = { syncResult = null },
                                 onDateChange = { syncDate = it },
                                 onToggle = { d ->
                                     selected = if (d in selected) selected - d else selected + d
@@ -330,6 +337,7 @@ class MainActivity : ComponentActivity() {
                                     // 在同步刚写入日志之后才执行，把新日志误删。
                                     events.clear()
                                     logStore.clearSync()
+                                    syncResult = null   // 清掉上一轮的结果提示
                                     running = true
                                     val target = syncDate
                                     job = lifecycleScope.launch {
@@ -343,7 +351,20 @@ class MainActivity : ComponentActivity() {
                                                 .collect { ev ->
                                                     events.add(ev)
                                                     batch += ev
+                                                    // 捕获最终结果 —— Done 是正常收尾，
+                                                    // Fatal 是致命错误，都要在界面上提示
+                                                    when (ev) {
+                                                        is SyncEvent.Done -> syncResult = SyncResult.Success(
+                                                            ev.totalUploaded, ev.totalSkipped, ev.totalFailed,
+                                                        )
+                                                        is SyncEvent.Fatal -> syncResult = SyncResult.Failure(ev.message)
+                                                        else -> Unit
+                                                    }
                                                 }
+                                        } catch (e: CancellationException) {
+                                            throw e
+                                        } catch (e: Exception) {
+                                            syncResult = SyncResult.Failure(e.message ?: "同步异常")
                                         } finally {
                                             // 中途取消/异常也要把已产生的日志留下来
                                             withContext(Dispatchers.IO) { logStore.appendAll(batch) }

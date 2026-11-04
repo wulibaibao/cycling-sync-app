@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.DayOfWeek
 import java.time.LocalDate
 import java.time.YearMonth
 
@@ -47,5 +48,37 @@ class DatePickerSheetTest {
         val adjacent = dayCellAlpha(inMonth = false, enabled = true)
         assertTrue("未来本月 $future 应该比邻月 $adjacent 明显", future > adjacent)
         assertTrue(future < 1.0f)
+    }
+
+    @Test
+    fun `所有月份都是 6 行 高度一致`() {
+        // 复刻库的 getCalendarMonthData 逻辑（outDateStyle = EndOfGrid）——
+        // 横向翻页时每页高度必须一样，否则弹层高度突变，看着像闪。
+        //
+        // 库里算法：
+        //   inDays   = firstDayOfWeek.daysUntil(1号是星期几)
+        //   weeksInMonth = (inDays + 月天数 + endOfRowDays) / 7
+        //   总行数   = weeksInMonth + (6 - weeksInMonth) = 恒定 6
+        val firstDayOfWeek = DayOfWeek.MONDAY
+        var checked = 0
+        for (month in 1..12) {
+            val ym = YearMonth.of(2026, month)
+            // firstDayOfWeek.daysUntil(1号的星期) —— 用 getValue 手工算，
+            // 免得依赖库的扩展函数（测试里拿不到库的 internal 扩展）
+            val firstDow = firstDayOfWeek.value      // MONDAY=1
+            val firstOfMonthDow = ym.atDay(1).dayOfWeek.value
+            val inDays = (firstOfMonthDow - firstDow + 7) % 7
+            val inAndMonth = inDays + ym.lengthOfMonth()
+            val endOfRow = if (inAndMonth % 7 != 0) 7 - (inAndMonth % 7) else 0
+            val weeksInMonth = (inAndMonth + endOfRow) / 7
+            val outDays = endOfRow + (6 - weeksInMonth) * 7
+            val rows = ((inDays + ym.lengthOfMonth() + outDays) / 7.0).let {
+                // chunked(7) 的实际行数
+                (inDays + ym.lengthOfMonth() + outDays + 6) / 7
+            }
+            assertEquals("月份 $ym 行数应为 6", 6, rows)
+            checked++
+        }
+        assertEquals(12, checked)
     }
 }

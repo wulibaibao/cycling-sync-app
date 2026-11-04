@@ -839,6 +839,91 @@ fun PlatformConfigScreen(
 
 // ---------------------------------------------------------------- 同步页
 
+/**
+ * 同步结果提示。
+ *
+ * 用户点了「开始同步」之后最想知道的就是「成了没」——
+ * 不用点进日志页就能看到。
+ */
+sealed interface SyncResult {
+    /** 成功结束。uploaded=上传成功数, skipped=跳过(已存在), failed=失败数 */
+    data class Success(val uploaded: Int, val skipped: Int, val failed: Int) : SyncResult
+
+    /** 失败 —— 致命错误或异常。 */
+    data class Failure(val message: String) : SyncResult
+}
+
+/**
+ * 同步结果提示条。
+ *
+ * - 成功：绿色底 + 对勾
+ * - 失败：红色底 + 感叹号
+ *
+ * 右边带一个关闭按钮 —— 用户看完可以手动收起。
+ */
+@Composable
+private fun SyncResultBanner(
+    result: SyncResult,
+    onDismiss: () -> Unit,
+) {
+    val isError = result is SyncResult.Failure
+    val bg = if (isError) {
+        MaterialTheme.colorScheme.errorContainer
+    } else {
+        MaterialTheme.colorScheme.primaryContainer
+    }
+    val fg = if (isError) {
+        MaterialTheme.colorScheme.onErrorContainer
+    } else {
+        MaterialTheme.colorScheme.onPrimaryContainer
+    }
+
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        color = bg,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(start = 14.dp, end = 4.dp, top = 10.dp, bottom = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = if (isError) Icons.Rounded.ErrorOutline else Icons.Rounded.CheckCircle,
+                contentDescription = null,
+                tint = fg,
+                modifier = Modifier.size(20.dp),
+            )
+            Spacer(Modifier.width(10.dp))
+            Text(
+                text = syncResultText(result),
+                style = MaterialTheme.typography.bodyMedium,
+                color = fg,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
+                Icon(
+                    Icons.Rounded.Close,
+                    contentDescription = "关闭",
+                    tint = fg,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+        }
+    }
+}
+
+/** 结果提示的一行文案。 */
+internal fun syncResultText(result: SyncResult): String = when (result) {
+    is SyncResult.Success -> buildString {
+        append("同步完成")
+        if (result.uploaded > 0) append(" · 上传 ${result.uploaded}")
+        if (result.skipped > 0) append(" · 跳过 ${result.skipped}")
+        if (result.failed > 0) append(" · 失败 ${result.failed}")
+    }
+    is SyncResult.Failure -> "同步失败：${result.message}"
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SyncScreen(
@@ -846,6 +931,8 @@ fun SyncScreen(
     selected: Set<SyncDirection>,
     states: PlatformStates,
     date: LocalDate,
+    result: SyncResult?,
+    onDismissResult: () -> Unit,
     onDateChange: (LocalDate) -> Unit,
     onToggle: (SyncDirection) -> Unit,
     onSync: () -> Unit,
@@ -893,6 +980,14 @@ fun SyncScreen(
         }
 
         Spacer(Modifier.height(10.dp))
+
+        // ── 同步结果提示 ────────────────────────────────────────
+        // 放在标题下面 —— 用户点了「开始同步」之后第一眼就能看到结果，
+        // 不用点进日志页才知道成没成。
+        if (result != null) {
+            SyncResultBanner(result = result, onDismiss = onDismissResult)
+            Spacer(Modifier.height(14.dp))
+        }
 
         Spacer(Modifier.height(14.dp))
 

@@ -47,6 +47,7 @@ import com.kizitonwose.calendar.compose.HorizontalCalendar
 import com.kizitonwose.calendar.compose.rememberCalendarState
 import com.kizitonwose.calendar.core.CalendarDay
 import com.kizitonwose.calendar.core.DayPosition
+import com.kizitonwose.calendar.core.OutDateStyle
 import com.kizitonwose.calendar.core.previousMonth
 import com.kizitonwose.calendar.core.nextMonth
 import kotlinx.coroutines.flow.filterNotNull
@@ -92,6 +93,10 @@ fun DatePickerSheet(
         endMonth = endMonth,
         firstVisibleMonth = YearMonth.from(selected),
         firstDayOfWeek = DayOfWeek.MONDAY,
+        // ⚠️ 必须用 EndOfGrid —— 默认的 EndOfRow 会让 5 行的月份只占 5 行、
+        // 6 行的月份占 6 行，横向翻页时每页高度不同，弹层高度会突变（看着像闪）。
+        // EndOfGrid 让**所有月份都是 6 行**，每页高度完全一致，翻页不再跳。
+        outDateStyle = OutDateStyle.EndOfGrid,
     )
 
     // 当前显示的月份（跟着左右滑动实时走）
