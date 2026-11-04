@@ -39,12 +39,13 @@ internal class DedupIndex {
                 return if (n > 1_000_000_000_000L) n else n * 1000L
             }
             // IGPSPORT 用点号分隔日期（"2026.10.31"），先归一化成横杠
-            val normalized = trimmed.replace('/', '.').replace('.', '-')
+            val normalized = trimmed.replace('/', '-').replace('.', '-')
             val patterns = listOf(
                 "yyyy-MM-dd HH:mm:ss",
                 "yyyy-MM-dd'T'HH:mm:ss",
                 "yyyy-MM-dd'T'HH:mm:ss.SSS",
                 "yyyy-MM-dd'T'HH:mm:ss'Z'",
+                "yyyy-MM-dd HH:mm",
                 "yyyy-MM-dd",
             )
             for (p in patterns) {
@@ -70,6 +71,26 @@ internal class DedupIndex {
 
     /** 辅助键（md5 / 名称） */
     private val auxKeys = mutableSetOf<String>()
+
+    /** 日期 + 距离模糊匹配（针对手动上传或无秒级精确时间差的记录） */
+    private data class DateDistPrint(val dateNorm: String, val distanceM: Double)
+    private val dateDistPrints = mutableListOf<DateDistPrint>()
+
+    fun addDateDist(dateStr: String, distanceM: Double) {
+        val norm = dateStr.replace('.', '-').replace('/', '-').take(10)
+        if (norm.length == 10 && distanceM > 0) {
+            dateDistPrints += DateDistPrint(norm, distanceM)
+        }
+    }
+
+    fun matchesDateDist(dateStr: String, distanceM: Double): Boolean {
+        val norm = dateStr.replace('.', '-').replace('/', '-').take(10)
+        if (norm.length < 10 || distanceM <= 0) return false
+        val tol = maxOf(80.0, distanceM * 0.015)
+        return dateDistPrints.any {
+            it.dateNorm == norm && kotlin.math.abs(it.distanceM - distanceM) <= tol
+        }
+    }
 
     /** 加入一条已有记录 */
     fun add(startMs: Long?, distanceM: Double, auxKey: String? = null) {

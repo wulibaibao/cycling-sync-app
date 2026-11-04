@@ -3,6 +3,7 @@ package com.wulibaibao.cyclicsync
 import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.padding
@@ -31,6 +32,9 @@ import com.wulibaibao.cyclicsync.data.PlatformAccount
 import com.wulibaibao.cyclicsync.data.SyncDirection
 import com.wulibaibao.cyclicsync.data.SyncEngine
 import com.wulibaibao.cyclicsync.data.SyncEvent
+import com.wulibaibao.cyclicsync.data.UnifiedActivity
+import com.wulibaibao.cyclicsync.data.ActivitySyncStatus
+import com.wulibaibao.cyclicsync.data.TargetSyncState
 import com.wulibaibao.cyclicsync.platform.IgpClient
 import com.wulibaibao.cyclicsync.platform.OneLapClient
 import com.wulibaibao.cyclicsync.platform.XingzheClient
@@ -44,6 +48,8 @@ import com.wulibaibao.cyclicsync.ui.PlatformStatus
 import com.wulibaibao.cyclicsync.ui.PlatformStates
 import com.wulibaibao.cyclicsync.ui.SyncResult
 import com.wulibaibao.cyclicsync.ui.SyncScreen
+import com.wulibaibao.cyclicsync.ui.directionEnabled
+import com.wulibaibao.cyclicsync.ui.ActivityLedgerScreen
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
@@ -52,6 +58,7 @@ private sealed interface Screen {
     data object Platforms : Screen
     data class Config(val platform: Platform) : Screen
     data object Sync : Screen
+    data object ClassicSync : Screen
     data object Logs : Screen
 }
 
@@ -76,6 +83,11 @@ class MainActivity : ComponentActivity() {
         val previous = Thread.getDefaultUncaughtExceptionHandler()
         Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
             runCatching {
+                android.util.Log.e("CyclingSync", "uncaught", throwable)
+                val f = java.io.File(getExternalFilesDir(null) ?: filesDir, "crash.txt")
+                f.writeText(throwable.stackTraceToString())
+            }
+            runCatching {
                 // ⚠️ 必须带上具体类名 —— 只显示 `NoClassDefFoundError` 等于没说，
                 // 用户截图发过来也没法定位。`NoClassDefFoundError` 的 message
                 // 里就是缺失类的全限定名。
@@ -85,53 +97,39 @@ class MainActivity : ComponentActivity() {
                     else -> ""
                 }
                 val text = if (detail.isNotEmpty()) {
-                    "出错了：${throwable.javaClass.simpleName}\n$detail"
+                    "出错了：${throwable.javaClass.simpleName}\n$detail\n日志已写入 crash.txt"
                 } else {
-                    "出错了：${throwable.javaClass.simpleName}\n${throwable.message?.take(120) ?: ""}"
+                    "出错了：${throwable.javaClass.simpleName}\n${throwable.message?.take(120) ?: ""}\n日志已写入 crash.txt"
                 }
                 Toast.makeText(this, text, Toast.LENGTH_LONG).show()
             }
-            // 交给系统处理（保留崩溃日志），但先记一笔
-            runCatching { android.util.Log.e("CyclingSync", "uncaught", throwable) }
             previous?.uncaughtException(thread, throwable)
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        installCrashGuard()
         store = CredentialStore(this)
         logStore = LogStore(this)
         uiPrefs = UiPrefs(this)
 
-        setContent {
+        try {
+            setContent {
             CyclingSyncTheme {
                 var screen by remember { mutableStateOf<Screen>(Screen.Sync) }
-                var tab by remember { mutableStateOf(0) }
                 // ⚠️ 凭据读取可能触发 Keystore 操作，**不能**在组合期同步执行 ——
-    // 抛异常会直接杀掉进程（用户看到的是 App 被关掉）。
-    var account by remember { mutableStateOf(PlatformAccount()) }
-    var credsLoaded by remember { mutableStateOf(false) }
-    LaunchedEffect(Unit) {
-        // ⚠️ 整个包 try/catch —— 协程里的未捕获异常会传播到主线程
-        // 直接杀掉进程（用户看到的是「一打开就闪退」）。
-        try {
-            val loaded = withContext(Dispatchers.IO) { store.load() }
-            account = loaded
-            // 从已保存的凭据恢复各平台登录态 —— 否则重装/重启后
-            // 凭据还在但界面显示「未配置」，用户以为要重新配。
-            states = restoreStates(loaded)
-        } catch (e: Exception) {
-            android.util.Log.e("CyclingSync", "load creds failed", e)
-        }
-        credsLoaded = true
-    }
+                // 抛异常会直接杀掉进程（用户看到的是 App 被关掉）。
+                var account by remember { mutableStateOf(PlatformAccount()) }
+                var credsLoaded by remember { mutableStateOf(false) }
+                var prefsLoaded by remember { mutableStateOf(false) }
                 var running by remember { mutableStateOf(false) }
                 var job by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
                 val events = remember { mutableStateListOf<SyncEvent>() }
+                var syncResult by remember { mutableStateOf<SyncResult?>(null) }
+                var selected by remember { mutableStateOf(emptySet<SyncDirection>()) }
+                var syncDate by remember { mutableStateOf(java.time.LocalDate.now()) }
 
-    // 同步结果提示（成功/失败）—— 显示在同步页顶部，不用点进日志页才知道结果
-    var syncResult by remember { mutableStateOf<SyncResult?>(null) }
-                // 恢复上次的日志 —— 否则 App 被杀掉后日志就没了
                 LaunchedEffect(Unit) {
                     try {
                         val saved = withContext(Dispatchers.IO) { logStore.load() }
@@ -142,26 +140,53 @@ class MainActivity : ComponentActivity() {
                     } catch (e: Exception) {
                         android.util.Log.e("CyclingSync", "load log failed", e)
                     }
-                }
-                // 同步方向 —— 默认**一个都不选**，用户自己勾。
-                // （之前默认选中「IGP→行者」和「OneLap→行者」两条，
-                //   首次打开就带着方向，容易误同步。）
-                // 用户勾过之后会存到本地偏好，下次打开自动恢复。
-                var selected by remember { mutableStateOf(emptySet<SyncDirection>()) }
-                var prefsLoaded by remember { mutableStateOf(false) }
-                LaunchedEffect(Unit) {
-                    try {
-                        val saved = withContext(Dispatchers.IO) { uiPrefs.loadDirections() }
-                            .mapNotNull { n -> runCatching { SyncDirection.valueOf(n) }.getOrNull() }
-                            .toSet()
-                        if (saved.isNotEmpty()) selected = saved
-                    } catch (e: Exception) {
-                        android.util.Log.e("CyclingSync", "load prefs failed", e)
+
+                    val loaded = withContext(Dispatchers.IO) { store.load() }
+                    val savedDirs = withContext(Dispatchers.IO) { uiPrefs.loadDirections() }
+                        .mapNotNull { n -> runCatching { SyncDirection.valueOf(n) }.getOrNull() }
+                        .toSet()
+                    val savedDateEpoch = withContext(Dispatchers.IO) { uiPrefs.loadLastDateEpochDay() }
+                    if (savedDateEpoch != null) {
+                        syncDate = java.time.LocalDate.ofEpochDay(savedDateEpoch)
                     }
+
+                    account = loaded
+                    val initStates = restoreStates(loaded)
+                    states = initStates
+                    val valid = SyncDirection.entries.filter { directionEnabled(it, initStates) }.toSet()
+                    selected = if (savedDirs.isNotEmpty()) {
+                        val pruned = savedDirs.filter { it in valid }.toSet()
+                        if (pruned.isNotEmpty()) pruned else valid
+                    } else {
+                        valid
+                    }
+                    credsLoaded = true
                     prefsLoaded = true
                 }
-                // 同步日期，默认当天
-                var syncDate by remember { mutableStateOf(java.time.LocalDate.now()) }
+
+                // 监听 states 变更：自动剔除未配置的链路，仅当源端和目标端均配置就绪时才允许选中
+                LaunchedEffect(states) {
+                    if (!prefsLoaded) return@LaunchedEffect
+                    val valid = SyncDirection.entries.filter { directionEnabled(it, states) }.toSet()
+                    val pruned = selected.filter { it in valid }.toSet()
+                    if (pruned != selected) {
+                        selected = pruned
+                        lifecycleScope.launch {
+                            uiPrefs.saveDirections(pruned.map { it.name }.toSet())
+                        }
+                    }
+                }
+
+                // 全局系统返回键劫持：在非主页时一律退回主页（活动看板）
+                BackHandler(enabled = screen != Screen.Sync) {
+                    screen = when (screen) {
+                        is Screen.Config -> Screen.Platforms
+                        is Screen.ClassicSync -> Screen.Sync
+                        is Screen.Logs -> Screen.Sync
+                        is Screen.Platforms -> Screen.Sync
+                        Screen.Sync -> Screen.Sync
+                    }
+                }
 
                 fun persist(a: PlatformAccount) {
                     account = a
@@ -171,24 +196,177 @@ class MainActivity : ComponentActivity() {
                     }
                 }
 
+                var activities by remember { mutableStateOf<List<UnifiedActivity>>(emptyList()) }
+                var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
+                var loadingActivities by remember { mutableStateOf(false) }
+                var batchProgressText by remember { mutableStateOf("") }
+                var batchCurrent by remember { mutableStateOf(0) }
+                var batchTotal by remember { mutableStateOf(0) }
+
+                fun isActPending(act: UnifiedActivity): Boolean {
+                    val applicableTargets = selected
+                        .filter { directionEnabled(it, states) && it.source == act.source }
+                        .map { it.target }
+                        .toSet()
+                    return act.isPendingFor(applicableTargets)
+                }
+
+                fun refreshActivities(source: Platform? = null) {
+                    loadingActivities = true
+                    lifecycleScope.launch {
+                        val engine = SyncEngine(account, this@MainActivity)
+                        val list = mutableListOf<UnifiedActivity>()
+                        val activeSources = selected.filter { directionEnabled(it, states) }.map { it.source }.toSet()
+                        val shouldFetchIgp = (source == null || source == Platform.IGP) && (activeSources.isEmpty() || Platform.IGP in activeSources)
+                        val shouldFetchOnelap = (source == null || source == Platform.ONELAP) && (activeSources.isEmpty() || Platform.ONELAP in activeSources)
+
+                        if (shouldFetchIgp && account.igpConfigured) {
+                            engine.fetchActivities(Platform.IGP, page = 1, pageSize = 20)
+                                .onSuccess { list += it }
+                        }
+                        if (shouldFetchOnelap && account.onelapConfigured) {
+                            engine.fetchActivities(Platform.ONELAP, page = 1, pageSize = 20)
+                                .onSuccess { list += it }
+                        }
+                        list.sortByDescending { it.startTimeMs }
+                        activities = list
+                        selectedIds = list
+                            .filter { isActPending(it) }
+                            .map { it.id }
+                            .toSet()
+                        loadingActivities = false
+                    }
+                }
+
+                fun loadAllHistory(source: Platform? = null) {
+                    loadingActivities = true
+                    lifecycleScope.launch {
+                        val engine = SyncEngine(account, this@MainActivity)
+                        val activeSources = selected.filter { directionEnabled(it, states) }.map { it.source }.toSet()
+                        val sourcesToStream = when {
+                            source != null -> listOf(source)
+                            activeSources.isNotEmpty() -> activeSources.toList()
+                            account.igpConfigured -> listOf(Platform.IGP)
+                            else -> listOf(Platform.ONELAP)
+                        }
+                        for (s in sourcesToStream) {
+                            engine.streamAllActivities(s, maxPages = 10, delayPerBatchMs = 250L).collect { batch ->
+                                activities = (activities + batch).distinctBy { it.id }.sortedByDescending { it.startTimeMs }
+                                selectedIds = activities
+                                    .filter { isActPending(it) }
+                                    .map { it.id }
+                                    .toSet()
+                            }
+                        }
+                        loadingActivities = false
+                    }
+                }
+
+                fun startBatchSync(targetPlatform: Platform = Platform.XINGZHE) {
+                    val pending = activities.filter { it.id in selectedIds && it.targetStates[targetPlatform]?.status != ActivitySyncStatus.SYNCED }
+                    val toSync = if (pending.isNotEmpty()) pending else activities.filter { it.id in selectedIds }
+                    if (toSync.isEmpty()) return
+                    events.clear()
+                    running = true
+                    batchTotal = toSync.size
+                    batchCurrent = 0
+                    job = lifecycleScope.launch {
+                        val engine = SyncEngine(account, this@MainActivity)
+                        engine.syncUnifiedBatch(toSync, targetPlatform).collect { ev ->
+                            events.add(ev)
+                            if (ev is SyncEvent.Step) {
+                                batchProgressText = ev.text
+                            }
+                            if (ev is SyncEvent.Ride) {
+                                batchCurrent++
+                                val isSuccess = ev.status == "已上传" || ev.status.contains("已存在") || ev.status.contains("已同步")
+                                activities = activities.map { act ->
+                                    val isMatch = if (ev.activityId.isNotBlank()) {
+                                        act.id == ev.activityId
+                                    } else {
+                                        act.title == ev.name && Math.abs(act.distanceKm - ev.distanceKm) < 0.2
+                                    }
+                                    if (isMatch) {
+                                        act.copy(
+                                            targetStates = act.targetStates + (targetPlatform to TargetSyncState(
+                                                status = if (isSuccess) ActivitySyncStatus.SYNCED else ActivitySyncStatus.FAILED,
+                                                errorDetail = ev.errorDetail,
+                                                syncedAtMs = System.currentTimeMillis()
+                                            ))
+                                        )
+                                    } else act
+                                }
+                            }
+                        }
+                        running = false
+                        selectedIds = activities
+                            .filter { isActPending(it) }
+                            .map { it.id }
+                            .toSet()
+                    }
+                }
+
+                fun startSingleSync(act: UnifiedActivity, targetPlatform: Platform = Platform.XINGZHE) {
+                    events.clear()
+                    running = true
+                    batchTotal = 1
+                    batchCurrent = 0
+                    batchProgressText = "正在同步到 ${targetPlatform.title}: ${act.title}..."
+                    job = lifecycleScope.launch {
+                        val engine = SyncEngine(account, this@MainActivity)
+                        engine.syncUnifiedBatch(listOf(act), targetPlatform).collect { ev ->
+                            events.add(ev)
+                            if (ev is SyncEvent.Step) {
+                                batchProgressText = ev.text
+                            }
+                            if (ev is SyncEvent.Ride) {
+                                batchCurrent++
+                                val isSuccess = ev.status == "已上传" || ev.status.contains("已存在") || ev.status.contains("已同步")
+                                activities = activities.map { a ->
+                                    val isMatch = if (ev.activityId.isNotBlank()) a.id == ev.activityId else a.id == act.id
+                                    if (isMatch) {
+                                        a.copy(
+                                            targetStates = a.targetStates + (targetPlatform to TargetSyncState(
+                                                status = if (isSuccess) ActivitySyncStatus.SYNCED else ActivitySyncStatus.FAILED,
+                                                errorDetail = ev.errorDetail,
+                                                syncedAtMs = System.currentTimeMillis()
+                                            ))
+                                        )
+                                    } else a
+                                }
+                            }
+                        }
+                        running = false
+                        selectedIds = activities
+                            .filter { isActPending(it) }
+                            .map { it.id }
+                            .toSet()
+                    }
+                }
+
+                LaunchedEffect(credsLoaded) {
+                    if (credsLoaded) {
+                        refreshActivities()
+                    }
+                }
+
+                val currentTab = when (screen) {
+                    is Screen.Platforms, is Screen.Config -> 1
+                    else -> 0
+                }
+
                 Scaffold(
                     bottomBar = {
                         NavigationBar {
                             NavigationBarItem(
-                                selected = tab == 0,
-                                onClick = {
-                                    tab = 0
-                                    screen = Screen.Sync
-                                },
+                                selected = currentTab == 0,
+                                onClick = { screen = Screen.Sync },
                                 icon = { Icon(Icons.Rounded.Sync, contentDescription = null) },
                                 label = { Text("同步") },
                             )
                             NavigationBarItem(
-                                selected = tab == 1,
-                                onClick = {
-                                    tab = 1
-                                    screen = Screen.Platforms
-                                },
+                                selected = currentTab == 1,
+                                onClick = { screen = Screen.Platforms },
                                 icon = { Icon(Icons.Rounded.Tune, contentDescription = null) },
                                 label = { Text("平台") },
                             )
@@ -199,10 +377,7 @@ class MainActivity : ComponentActivity() {
                         when (val s = screen) {
                             is Screen.Platforms -> PlatformListScreen(
                                 states = states,
-                                onOpen = { p ->
-                                    tab = 0
-                                    screen = Screen.Config(p)
-                                },
+                                onOpen = { p -> screen = Screen.Config(p) },
                             )
 
                             is Screen.Config -> PlatformConfigScreen(
@@ -308,16 +483,16 @@ class MainActivity : ComponentActivity() {
                             )
 
                             is Screen.Logs -> LogsScreen(
-                    events = events.toList(),
-                    running = running,
-                    onBack = { screen = Screen.Sync },
-                    onClear = {
-                        events.clear()
-                        logStore.clearSync()
-                    },
-                )
+                                events = events.toList(),
+                                running = running,
+                                onBack = { screen = Screen.Sync },
+                                onClear = {
+                                    events.clear()
+                                    logStore.clearSync()
+                                },
+                            )
 
-                is Screen.Sync -> SyncScreen(
+                            is Screen.ClassicSync -> SyncScreen(
                                 running = running,
                                 selected = selected,
                                 states = states,
@@ -346,7 +521,7 @@ class MainActivity : ComponentActivity() {
                                         //   + 全量重写文件，O(n²)，界面会被卡死。）
                                         val batch = mutableListOf<SyncEvent>()
                                         try {
-                                            SyncEngine(account)
+                                            SyncEngine(account, this@MainActivity)
                                                 .sync(selected.toList(), target)
                                                 .collect { ev ->
                                                     events.add(ev)
@@ -377,13 +552,60 @@ class MainActivity : ComponentActivity() {
                                     running = false
                                 },
                                 onOpenLogs = { screen = Screen.Logs },
+                                onBack = { screen = Screen.Sync },
+                                onOpenConfig = { p -> screen = Screen.Config(p) },
+                            )
+
+                            is Screen.Sync -> ActivityLedgerScreen(
+                                running = running,
+                                selectedDirections = selected.filter { directionEnabled(it, states) }.toSet(),
+                                batchProgressText = batchProgressText,
+                                batchCurrent = batchCurrent,
+                                batchTotal = batchTotal,
+                                loading = loadingActivities,
+                                activities = activities,
+                                selectedIds = selectedIds,
+                                onToggleSelect = { id ->
+                                    selectedIds = if (id in selectedIds) selectedIds - id else selectedIds + id
+                                },
+                                onSelectAllPending = {
+                                    selectedIds = activities
+                                        .filter { isActPending(it) }
+                                        .map { it.id }
+                                        .toSet()
+                                },
+                                onClearSelect = { selectedIds = emptySet() },
+                                onBatchSync = { target -> startBatchSync(target) },
+                                onSingleSync = { act, target -> startSingleSync(act, target) },
+                                onRefresh = { refreshActivities() },
+                                onLoadAllHistory = { loadAllHistory() },
+                                onStop = {
+                                    job?.cancel()
+                                    running = false
+                                },
+                                onOpenLogs = { screen = Screen.Logs },
+                                onSwitchToClassic = { screen = Screen.ClassicSync },
                             )
                         }
                     }
                 }
             }
         }
-        installCrashGuard()
+    } catch (t: Throwable) {
+            android.util.Log.e("CyclingSync", "Fatal crash in setContent", t)
+            runCatching {
+                java.io.File(getExternalFilesDir(null) ?: filesDir, "crash.txt").writeText(t.stackTraceToString())
+            }
+            val tv = android.widget.TextView(this).apply {
+                text = "应用启动异常：\n\n${t.stackTraceToString()}"
+                setTextIsSelectable(true)
+                textSize = 13f
+                setTextColor(android.graphics.Color.RED)
+                setPadding(32, 48, 32, 48)
+            }
+            val sv = android.widget.ScrollView(this).apply { addView(tv) }
+            setContentView(sv)
+        }
     }
 
     // ---------------------------------------------------------- 逐平台验证
@@ -673,7 +895,7 @@ class MainActivity : ComponentActivity() {
                 .onFailure {
                     Toast.makeText(this@MainActivity, "登录失败: ${it.message}", Toast.LENGTH_LONG).show()
                     states = states.with(
-                        Platform.IGP,
+                        Platform.XINGZHE,
                         PlatformState(status = PlatformStatus.FAILED, detail = it.message ?: "登录失败"),
                     )
                 }
@@ -692,6 +914,9 @@ class MainActivity : ComponentActivity() {
                 onelapPassword = "",
             )
             Platform.IGP -> account.copy(
+                igpPhone = "",
+                igpAccount = "",
+                igpPassword = "",
                 igpToken = "",
                 igpRefreshToken = "",
                 igpExpiresAt = 0L,
@@ -702,6 +927,8 @@ class MainActivity : ComponentActivity() {
                 xingzheSessionId = "",
                 xingzheUsername = "",
                 xingzheUserId = "",
+                xingzheEnuid = "",
+                xingzheMobile = "",
             )
         }
         onDone(cleared)

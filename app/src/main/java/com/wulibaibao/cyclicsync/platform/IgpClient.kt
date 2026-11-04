@@ -233,7 +233,11 @@ internal class IgpClient {
             headers = authHeaders("GET", path, ""),
         )
         if (!r.ok) return Result.failure(Exception("刷新失败 HTTP ${r.code}"))
-        val obj = JsonAny.parseToJsonElement(r.body).jsonObject
+        val obj = try {
+            JsonAny.parseToJsonElement(r.body).jsonObject
+        } catch (e: Exception) {
+            return Result.failure(Exception("刷新响应解析失败: ${r.body.take(150)}"))
+        }
         val d = obj["data"] as? JsonObject ?: return Result.failure(Exception("刷新无 data"))
         token = d["access_token"]?.jsonPrimitive?.content ?: d["accessToken"]?.jsonPrimitive?.content ?: token
         refreshToken = d["refresh_token"]?.jsonPrimitive?.content ?: d["refreshToken"]?.jsonPrimitive?.content ?: refreshToken
@@ -253,11 +257,11 @@ internal class IgpClient {
     }
 
     /** 拉活动列表（GET + query 参数，与 web-analyze 模块一致） */
-    suspend fun listActivities(pageSize: Int = 20, beginTime: String? = null): Result<List<IgpActivity>> {
+    suspend fun listActivities(pageNo: Int = 1, pageSize: Int = 20, beginTime: String? = null): Result<List<IgpActivity>> {
         ensureToken().onFailure { return Result.failure(it) }
         val path = "/service/web-gateway/web-analyze/activity/queryMyActivity"
         val query = buildString {
-            append("?pageNo=1&pageSize=").append(pageSize).append("&sort=1&reqType=0")
+            append("?pageNo=").append(pageNo).append("&pageSize=").append(pageSize).append("&sort=1&reqType=0")
             beginTime?.let { append("&beginTime=").append(java.net.URLEncoder.encode(it, "UTF-8")) }
         }
         val r = Http.request(
@@ -266,7 +270,11 @@ internal class IgpClient {
             headers = plainHeaders() + bearer(),
         )
         if (!r.ok) return Result.failure(Exception("HTTP ${r.code}: ${r.body.take(200)}"))
-        val obj = JsonAny.parseToJsonElement(r.body).jsonObject
+        val obj = try {
+            JsonAny.parseToJsonElement(r.body).jsonObject
+        } catch (e: Exception) {
+            return Result.failure(Exception("活动列表响应解析失败: ${r.body.take(150)}"))
+        }
         // 业务错误
         val bizCode = (obj["code"]?.jsonPrimitive?.content ?: "0").toIntOrNull() ?: 0
         if (bizCode != 0) {
@@ -289,7 +297,7 @@ internal class IgpClient {
             ) {
                 refresh()
                 if (hasValidToken()) {
-                    return listActivities(pageSize, beginTime)
+                    return listActivities(pageNo, pageSize, beginTime)
                 }
             }
             return Result.failure(Exception("IGPSPORT 返回异常: $hint"))
@@ -330,15 +338,20 @@ internal class IgpClient {
     suspend fun downloadFit(rideId: String): Result<ByteArray> {
         ensureToken().onFailure { return Result.failure(it) }
         // ⚠️ rideId 是路径参数，不是 query —— 用 "?rideId=" 会返回 500「服务器异常」（实测）。
-        val path = "/service/web-gateway/web-analyze/activity/getDownloadUrl/$rideId"
-        val url = DOWNLOAD_URL + java.net.URLEncoder.encode(rideId, "UTF-8")
+        val encodedId = java.net.URLEncoder.encode(rideId, "UTF-8")
+        val path = "/service/web-gateway/web-analyze/activity/getDownloadUrl/$encodedId"
+        val url = DOWNLOAD_URL + encodedId
         val r = Http.request(
             method = "GET",
             url = url,
             headers = authHeaders("GET", path, ""),
         )
         if (!r.ok) return Result.failure(Exception("getDownloadUrl HTTP ${r.code}: ${r.body.take(150)}"))
-        val obj = JsonAny.parseToJsonElement(r.body).jsonObject
+        val obj = try {
+            JsonAny.parseToJsonElement(r.body).jsonObject
+        } catch (e: Exception) {
+            return Result.failure(Exception("getDownloadUrl 响应解析失败: ${r.body.take(150)}"))
+        }
         // data 可能是纯字符串 URL，也可能是对象
         val downloadUrl = when {
             obj["data"] is kotlinx.serialization.json.JsonPrimitive ->
@@ -385,7 +398,11 @@ internal class IgpClient {
             headers = authHeaders("GET", path1, ""),
         )
         if (!r1.ok) return Result.failure(Exception("getSignedUrl HTTP ${r1.code}: ${r1.body.take(150)}"))
-        val obj1 = JsonAny.parseToJsonElement(r1.body).jsonObject
+        val obj1 = try {
+            JsonAny.parseToJsonElement(r1.body).jsonObject
+        } catch (e: Exception) {
+            return Result.failure(Exception("getSignedUrl 响应解析失败: ${r1.body.take(150)}"))
+        }
         if ((obj1["code"]?.jsonPrimitive?.content ?: "0").toIntOrNull() != 0) {
             return Result.failure(Exception("getSignedUrl 失败: ${obj1["message"]?.jsonPrimitive?.content}"))
         }
@@ -433,7 +450,11 @@ internal class IgpClient {
             body = body3.toByteArray(),
         )
         if (!r3.ok) return Result.failure(Exception("uploadByOss HTTP ${r3.code}: ${r3.body.take(150)}"))
-        val obj3 = JsonAny.parseToJsonElement(r3.body).jsonObject
+        val obj3 = try {
+            JsonAny.parseToJsonElement(r3.body).jsonObject
+        } catch (e: Exception) {
+            return Result.failure(Exception("uploadByOss 响应解析失败: ${r3.body.take(150)}"))
+        }
         val code3 = (obj3["code"]?.jsonPrimitive?.content ?: "0").toIntOrNull() ?: 0
         if (code3 != 0) {
             return Result.failure(Exception("uploadByOss 失败: ${obj3["message"]?.jsonPrimitive?.content}"))

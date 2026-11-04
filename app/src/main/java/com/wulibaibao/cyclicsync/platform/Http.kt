@@ -175,7 +175,9 @@ internal object Http {
             val payload = out.toByteArray()
             conn.outputStream.use { os -> os.write(payload) }
             val code = conn.responseCode
-            val raw = (if (code in 200..299) conn.inputStream else conn.errorStream)?.readBytes() ?: ByteArray(0)
+            val encoding = conn.getHeaderField("Content-Encoding")?.lowercase() ?: ""
+            val raw = (if (code in 200..299) conn.inputStream else conn.errorStream)
+                ?.let { readEncoded(it, encoding) } ?: ByteArray(0)
             val cookies = readSetCookie(conn)
             HttpResult(code, String(raw, Charsets.UTF_8), raw, cookies)
         } catch (e: Exception) {

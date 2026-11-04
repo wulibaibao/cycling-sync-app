@@ -26,3 +26,5 @@ Thumbs.db
 
 # 日志
 *.log
+cached_creds.xml
+crash.txt

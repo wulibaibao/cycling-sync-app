@@ -44,7 +44,7 @@ internal object RawHttp {
             ?: return@withContext RawResult(-1, "URL 无 host: $url")
         val port = if (uri.port > 0) uri.port else 443
         val path = buildString {
-            append(uri.rawPath ?: "/")
+            append(uri.rawPath?.takeIf { it.isNotEmpty() } ?: "/")
             uri.rawQuery?.let { append("?").append(it) }
         }
         val hostHeader = if (port == 443) host else "$host:$port"
@@ -56,12 +56,13 @@ internal object RawHttp {
                 val factory = SSLSocketFactory.getDefault()
                 val tls = factory.createSocket() as SSLSocket
                 tls.apply {
-                    // SNI —— 不设置部分服务端握手会失败
+                    // SNI 与 Hostname 校验 —— 不设置部分服务端握手会失败，且缺少主机名校验存在中间人风险
                     val params = sslParameters
+                    params.endpointIdentificationAlgorithm = "HTTPS"
                     if (params.serverNames.isNullOrEmpty()) {
                         params.serverNames = listOf(javax.net.ssl.SNIHostName(host))
-                        sslParameters = params
                     }
+                    sslParameters = params
                     useClientMode = true
                     connect(java.net.InetSocketAddress(host, port), timeoutMs)
                     setSoTimeout(timeoutMs)

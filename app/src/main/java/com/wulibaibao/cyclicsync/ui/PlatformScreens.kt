@@ -1,5 +1,6 @@
 package com.wulibaibao.cyclicsync.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.platform.LocalClipboardManager
@@ -11,7 +12,10 @@ import androidx.compose.material.icons.rounded.ListAlt
 import androidx.compose.material.icons.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.KeyboardArrowLeft
 import androidx.compose.material.icons.rounded.CalendarToday
+import androidx.compose.material3.DatePicker
+import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.rememberDatePickerState
 import androidx.compose.material3.TextButton
 import java.time.Instant
 import java.time.LocalDate
@@ -25,6 +29,7 @@ import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -219,7 +224,7 @@ fun PlatformListScreen(
             )
             Spacer(Modifier.width(6.dp))
             Text(
-                "凭据本机加密存储，不上传服务器",
+                "凭据本机加密存储 · 骑行同步 v2.0",
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -546,7 +551,6 @@ private fun ClearButton(value: String, onClear: () -> Unit): (@Composable () -> 
 
 // ---------------------------------------------------------------- 单平台配置页// ---------------------------------------------------------------- 单平台配置页
 
-@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 fun PlatformConfigScreen(
     platform: Platform,
@@ -554,13 +558,12 @@ fun PlatformConfigScreen(
     state: PlatformState,
     onBack: () -> Unit,
     onSendSms: (String) -> Unit,
-    /** (手机号, 验证码) —— 手机号必须一起回传：它只存在于界面本地状态，
-     *  没有写进已保存的 account，Activity 侧拿不到就无法校验和登录。 */
     onVerifyCode: (String, String) -> Unit,
     onLogin: (String, String) -> Unit,
     onPasswordLogin: (String, String) -> Unit,
     onLoggedOut: (Platform) -> Unit,
 ) {
+    BackHandler { onBack() }
     var onelapAccount by remember { mutableStateOf(account.onelapAccount) }
     var onelapPassword by remember { mutableStateOf(account.onelapPassword) }
     var igpPhone by remember { mutableStateOf(account.igpPhone) }
@@ -683,7 +686,7 @@ fun PlatformConfigScreen(
                                     trailingIcon = ClearButton(igpCode) { igpCode = "" },
                                     modifier = Modifier.fillMaxWidth(),
                                 )
-                                FlowRow(
+                                Row(
                                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                                     modifier = Modifier.fillMaxWidth(),
                                 ) {
@@ -693,7 +696,7 @@ fun PlatformConfigScreen(
                                         modifier = Modifier.weight(1f),
                                     )
                                     FilledTonalButton(
-                                        onClick = { onVerifyCode(igpPhone, igpCode) },
+                                        onClick = { onVerifyCode(igpPhone.trim(), igpCode.trim()) },
                                         shape = RoundedCornerShape(16.dp),
                                         modifier = Modifier.weight(1f),
                                     ) { Text("登录") }
@@ -751,7 +754,7 @@ fun PlatformConfigScreen(
                                     trailingIcon = ClearButton(xzCode) { xzCode = "" },
                                     modifier = Modifier.fillMaxWidth(),
                                 )
-                                FlowRow(
+                                Row(
                                     horizontalArrangement = Arrangement.spacedBy(12.dp),
                                     modifier = Modifier.fillMaxWidth(),
                                 ) {
@@ -761,7 +764,7 @@ fun PlatformConfigScreen(
                                         modifier = Modifier.weight(1f),
                                     )
                                     FilledTonalButton(
-                                        onClick = { onVerifyCode(xzMobile, xzCode) },
+                                        onClick = { onVerifyCode(xzMobile.trim(), xzCode.trim()) },
                                         shape = RoundedCornerShape(16.dp),
                                         modifier = Modifier.weight(1f),
                                     ) { Text("登录") }
@@ -838,6 +841,18 @@ fun PlatformConfigScreen(
 }
 
 // ---------------------------------------------------------------- 同步页
+
+private data class DirectionMeta(
+    val title: String,
+    val description: String,
+)
+
+private fun getDirectionMeta(dir: SyncDirection): DirectionMeta = when (dir) {
+    SyncDirection.IGP_TO_XINGZHE -> DirectionMeta("迹驰码表 ➔ 行者社区", "路骑码表原始 FIT 自动解析并上传至行者")
+    SyncDirection.ONELAP_TO_XINGZHE -> DirectionMeta("顽鹿功率台 ➔ 行者社区", "室内骑行台踏频、功率及训练记录同步至行者")
+    SyncDirection.ONELAP_TO_IGP -> DirectionMeta("顽鹿功率台 ➔ 迹驰云端", "室内训练 FIT 文件自动汇聚到迹驰码表账号")
+    SyncDirection.IGP_TO_ONELAP -> DirectionMeta("迹驰码表 ➔ 顽鹿云端", "户外路骑记录导入顽鹿用于能力分析与图表呈现")
+}
 
 /**
  * 同步结果提示。
@@ -927,45 +942,48 @@ internal fun syncResultText(result: SyncResult): String = when (result) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SyncScreen(
-    running: Boolean,
+    running: Boolean = false,
     selected: Set<SyncDirection>,
     states: PlatformStates,
-    date: LocalDate,
-    result: SyncResult?,
-    onDismissResult: () -> Unit,
-    onDateChange: (LocalDate) -> Unit,
+    date: LocalDate = LocalDate.now(),
+    result: SyncResult? = null,
+    onDismissResult: () -> Unit = {},
+    onDateChange: (LocalDate) -> Unit = {},
     onToggle: (SyncDirection) -> Unit,
-    onSync: () -> Unit,
-    onStop: () -> Unit,
+    onSync: () -> Unit = {},
+    onStop: () -> Unit = {},
     onOpenLogs: () -> Unit,
+    onBack: () -> Unit = {},
+    onOpenConfig: (Platform) -> Unit = {},
 ) {
-    var showDatePicker by remember { mutableStateOf(false) }
+    BackHandler { onBack() }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(horizontal = 20.dp),
     ) {
-        // ── 可滚动内容区 ──────────────────────────────────────
-        // 之前整个页面 verticalScroll，按钮跟着内容走 →
-        // 内容少时按钮浮在中间，下方一大片空白。
-        // 现在：内容区自己滚（weight 1f），按钮固定在底部吸底。
-        Column(
-            modifier = Modifier
-                .weight(1f)
-                .verticalScroll(rememberScrollState()),
+        Spacer(Modifier.height(16.dp))
+        // 顶部常驻导航条（固定置顶，不参与滚动，返回键永久可见）
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.fillMaxWidth().padding(bottom = 6.dp),
         ) {
-        Spacer(Modifier.height(20.dp))
-        // 标题行 —— 右侧放日志入口图标（固定在顶部，不会被同步日志挤下去）
-        Row(verticalAlignment = Alignment.CenterVertically) {
+            IconButton(onClick = onBack) {
+                Icon(
+                    Icons.AutoMirrored.Rounded.ArrowBack,
+                    contentDescription = "返回活动看板",
+                )
+            }
+            Spacer(Modifier.width(4.dp))
             Column(Modifier.weight(1f)) {
                 Text(
-                    "同步",
+                    "同步链路配置",
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold,
                 )
                 Text(
-                    "选择同步方向",
+                    "选择数据源与分发目标平台",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -979,199 +997,331 @@ fun SyncScreen(
             }
         }
 
-        Spacer(Modifier.height(10.dp))
-
-        // ── 同步结果提示 ────────────────────────────────────────
-        // 放在标题下面 —— 用户点了「开始同步」之后第一眼就能看到结果，
-        // 不用点进日志页才知道成没成。
         if (result != null) {
+            Spacer(Modifier.height(10.dp))
             SyncResultBanner(result = result, onDismiss = onDismissResult)
-            Spacer(Modifier.height(14.dp))
         }
 
-        Spacer(Modifier.height(14.dp))
-
-        // ===== 日期选择 =====
-        // 同步日期 —— 整块可点，弹日历选任意一天
-        Surface(
-            shape = RoundedCornerShape(20.dp),
-            color = MaterialTheme.colorScheme.surface,
-            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        // 下方内容独立滚动
+        Column(
             modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(20.dp))
-                .clickable { showDatePicker = true },
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState()),
         ) {
+
+            Spacer(Modifier.height(8.dp))
+
+            // 平台连接状态微胶囊横条
             Row(
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Surface(
-                    shape = CircleShape,
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    modifier = Modifier.size(42.dp),
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            Icons.Rounded.CalendarToday,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                            modifier = Modifier.size(20.dp),
-                        )
-                    }
-                }
-                Spacer(Modifier.width(14.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        "同步日期",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Spacer(Modifier.height(2.dp))
-                    // 日期和星期拆成两块 —— 挤在一行时「周日」会被拆行
-                    // （今天 · 11月1日 周日 → 「周」在行尾、「日」单独掉到下一行）。
-                    Text(
-                        dateText(date),
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                        maxLines = 1,
-                        softWrap = false,
-                    )
-                }
-                // 「选择 ›」垂直居中，和日期行对齐
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        "选择",
-                        style = MaterialTheme.typography.labelLarge,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Icon(
-                        Icons.Rounded.KeyboardArrowRight,
-                        contentDescription = null,
-                        tint = MaterialTheme.colorScheme.primary,
-                    )
-                }
-            }
-        }
-
-        Spacer(Modifier.height(16.dp))
-
-        Text(
-            "同步方向",
-            style = MaterialTheme.typography.titleMedium,
-            fontWeight = FontWeight.Bold,
-        )
-        Spacer(Modifier.height(10.dp))
-
-        SyncDirection.entries.forEach { dir ->
-            val enabled = directionEnabled(dir, states)
-            val isOn = dir in selected
-            val alpha by animateFloatAsState(if (isOn) 1f else 0.7f, label = "alpha")
-
-            Surface(
-                onClick = { if (enabled) onToggle(dir) },
-                shape = RoundedCornerShape(22.dp),
-                color = if (isOn)
-                    MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
-                else MaterialTheme.colorScheme.surface,
-                border = if (isOn)
-                    BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
-                else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 10.dp),
+                    .horizontalScroll(rememberScrollState()),
             ) {
-                Row(
-                    Modifier.padding(horizontal = 16.dp, vertical = 11.dp),
-                    verticalAlignment = Alignment.CenterVertically,
+                Platform.entries.forEach { p ->
+                    val state = states.forPlatform(p)
+                    val ready = state.isReady()
+                    Surface(
+                        onClick = { onOpenConfig(p) },
+                        shape = RoundedCornerShape(12.dp),
+                        color = if (ready) p.color.copy(alpha = 0.12f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f),
+                        border = BorderStroke(
+                            1.dp,
+                            if (ready) p.color.copy(alpha = 0.35f) else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        ),
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        ) {
+                            Icon(
+                                p.icon,
+                                contentDescription = null,
+                                tint = if (ready) p.color else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(14.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                p.title.replace(" OneLap", "").replace(" XOSS", ""),
+                                style = MaterialTheme.typography.labelSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = if (ready) p.color else MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.width(4.dp))
+                            Text(
+                                if (ready) "✓已连接" else "未连接 ›",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = if (ready) p.color else MaterialTheme.colorScheme.error,
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(18.dp))
+
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    "同步链路方向",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    "前后两端均已登录方可启用",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+
+            // 链路卡片列表（专业分层卡片架构，告别行内挤压）
+            SyncDirection.entries.forEach { dir ->
+                val enabled = directionEnabled(dir, states)
+                val isOn = enabled && (dir in selected)
+                val meta = getDirectionMeta(dir)
+                val missing = directionMissingPlatforms(dir, states)
+
+                Surface(
+                    onClick = {
+                        if (enabled) {
+                            onToggle(dir)
+                        } else if (missing.isNotEmpty()) {
+                            onOpenConfig(missing.first())
+                        }
+                    },
+                    shape = RoundedCornerShape(20.dp),
+                    color = when {
+                        !enabled -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                        isOn -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                        else -> MaterialTheme.colorScheme.surface
+                    },
+                    border = when {
+                        !enabled -> BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.35f))
+                        isOn -> BorderStroke(2.dp, MaterialTheme.colorScheme.primary)
+                        else -> BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f))
+                    },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 12.dp),
                 ) {
-                    Icon(
-                        imageVector = if (isOn) Icons.Rounded.CheckCircle
-                        else Icons.Rounded.RadioButtonUnchecked,
-                        contentDescription = null,
-                        tint = if (isOn) MaterialTheme.colorScheme.primary
-                        else MaterialTheme.colorScheme.outlineVariant,
-                        modifier = Modifier.size(20.dp),
-                    )
-                    Spacer(Modifier.width(12.dp))
-                    // 平台名在前（源 → 目标），平台用品牌色
+                    Column(
+                        modifier = Modifier.padding(16.dp),
+                    ) {
+                        // 第一行：标题 + 状态徽章
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Icon(
+                                imageVector = when {
+                                    !enabled -> Icons.Rounded.RadioButtonUnchecked
+                                    isOn -> Icons.Rounded.CheckCircle
+                                    else -> Icons.Rounded.RadioButtonUnchecked
+                                },
+                                contentDescription = null,
+                                tint = when {
+                                    !enabled -> MaterialTheme.colorScheme.outline.copy(alpha = 0.4f)
+                                    isOn -> MaterialTheme.colorScheme.primary
+                                    else -> MaterialTheme.colorScheme.outlineVariant
+                                },
+                                modifier = Modifier.size(20.dp),
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            Text(
+                                meta.title,
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = if (isOn) FontWeight.Bold else FontWeight.SemiBold,
+                                color = if (enabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f),
+                                modifier = Modifier.weight(1f),
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            if (enabled) {
+                                if (isOn) {
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = MaterialTheme.colorScheme.primary,
+                                    ) {
+                                        Text(
+                                            "已启用",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onPrimary,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                        )
+                                    }
+                                } else {
+                                    Surface(
+                                        shape = RoundedCornerShape(8.dp),
+                                        color = MaterialTheme.colorScheme.surfaceVariant,
+                                    ) {
+                                        Text(
+                                            "点击启用",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                        )
+                                    }
+                                }
+                            } else {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.85f),
+                                ) {
+                                    Text(
+                                        "需配置 " + missing.joinToString("与") { it.title.replace(" OneLap", "").replace(" XOSS", "") },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        fontWeight = FontWeight.Medium,
+                                        color = MaterialTheme.colorScheme.onErrorContainer,
+                                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(10.dp))
+
+                        // 第二行：两端流程图示（充裕水平空间，永不换行挤压）
+                        Surface(
+                            shape = RoundedCornerShape(12.dp),
+                            color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.Center,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 10.dp, horizontal = 12.dp),
+                            ) {
+                                // 源平台
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        dir.source.icon,
+                                        contentDescription = null,
+                                        tint = dir.source.color.copy(alpha = if (enabled) 1f else 0.45f),
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        dir.source.title,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = dir.source.color.copy(alpha = if (enabled) 1f else 0.45f),
+                                    )
+                                }
+
+                                Spacer(Modifier.width(14.dp))
+                                Text(
+                                    "➔",
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = if (enabled) 0.85f else 0.4f),
+                                )
+                                Spacer(Modifier.width(14.dp))
+
+                                // 目标平台
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        dir.target.icon,
+                                        contentDescription = null,
+                                        tint = dir.target.color.copy(alpha = if (enabled) 1f else 0.45f),
+                                        modifier = Modifier.size(18.dp),
+                                    )
+                                    Spacer(Modifier.width(6.dp))
+                                    Text(
+                                        dir.target.title,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = dir.target.color.copy(alpha = if (enabled) 1f else 0.45f),
+                                    )
+                                }
+                            }
+                        }
+
+                        Spacer(Modifier.height(8.dp))
+
+                        // 第三行：说明文字或引导点击配置
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            if (enabled) {
+                                Text(
+                                    meta.description,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f),
+                                    modifier = Modifier.weight(1f),
+                                )
+                            } else {
+                                Text(
+                                    "点击立即前往登录连接 ${missing.firstOrNull()?.title ?: ""} 平台",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.weight(1f),
+                                )
+                                Icon(
+                                    Icons.Rounded.KeyboardArrowRight,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 智能双向防环提示
+            val bothOnelapAndIgpSelected = (SyncDirection.ONELAP_TO_IGP in selected) && (SyncDirection.IGP_TO_ONELAP in selected)
+            if (bothOnelapAndIgpSelected) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                ) {
                     Row(
+                        modifier = Modifier.padding(12.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.weight(1f),
                     ) {
                         Text(
-                            dir.source.title,
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = if (isOn) FontWeight.Bold else FontWeight.Medium,
-                            color = dir.source.color.copy(alpha = alpha),
-                        )
-                        Text(
-                            "  →  ",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = alpha),
-                        )
-                        Text(
-                            dir.target.title,
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = if (isOn) FontWeight.Bold else FontWeight.Medium,
-                            color = dir.target.color.copy(alpha = alpha),
-                        )
-                    }
-                    if (!enabled) {
-                        Text(
-                            "需先配置",
+                            "💡 已开启两端互传，系统内置时间指纹与 MD5 判重，自动防重复",
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.error,
+                            color = MaterialTheme.colorScheme.onSecondaryContainer,
                         )
                     }
                 }
             }
-        }
 
-        }   // ← 可滚动内容区结束
+            Spacer(Modifier.height(8.dp))
 
-        // ── 底部固定操作区 ────────────────────────────────────
-        Spacer(Modifier.height(10.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(
-                onClick = onSync,
-                enabled = !running && selected.isNotEmpty(),
-                shape = RoundedCornerShape(18.dp),
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(vertical = 14.dp),
-            ) {
-                if (running) {
-                    CircularProgressIndicator(
+            val validSelectedCount = selected.count { directionEnabled(it, states) }
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Button(
+                    onClick = onBack,
+                    enabled = true,
+                    shape = RoundedCornerShape(18.dp),
+                    modifier = Modifier.weight(1f),
+                    contentPadding = PaddingValues(vertical = 14.dp),
+                ) {
+                    Icon(
+                        if (validSelectedCount > 0) Icons.Rounded.CheckCircle else Icons.AutoMirrored.Rounded.ArrowBack,
+                        contentDescription = null,
                         modifier = Modifier.size(20.dp),
-                        strokeWidth = 2.dp,
-                        color = MaterialTheme.colorScheme.onPrimary,
                     )
-                } else {
-                    Icon(Icons.Rounded.Sync, contentDescription = null, modifier = Modifier.size(20.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("开始同步", fontWeight = FontWeight.Bold)
+                    Text(
+                        if (validSelectedCount > 0) "保存并返回活动看板 ($validSelectedCount 条链路生效)" else "返回活动看板 (未启用链路)",
+                        fontWeight = FontWeight.Bold,
+                    )
                 }
             }
-            if (running) {
-                OutlinedButton(
-                    onClick = onStop,
-                    shape = RoundedCornerShape(18.dp),
-                    contentPadding = PaddingValues(horizontal = 22.dp, vertical = 14.dp),
-                ) { Text("停止") }
-            }
+
+            Spacer(Modifier.height(24.dp))
         }
-
-        Spacer(Modifier.height(16.dp))
-    }
-
-    // 日期选择 —— 底部弹层月历（替代 Material3 的 DatePickerDialog）
-    if (showDatePicker) {
-        DatePickerSheet(
-            selected = date,
-            onDateSelected = onDateChange,
-            onDismiss = { showDatePicker = false },
-        )
     }
 }
 
@@ -1219,14 +1369,17 @@ private fun SmsCountdownButton(
     }
 }
 
+
+
 /** 独立日志页 —— 完整事件列表 + 清除 */
 @Composable
 fun LogsScreen(
     events: List<SyncEvent>,
-    running: Boolean,
+    running: Boolean = false,
     onBack: () -> Unit,
     onClear: () -> Unit,
 ) {
+    BackHandler { onBack() }
     // 「本次」= 本次同步产生的（最后一个 Done 之后）；「全部」= 所有历史
     var showAll by remember { mutableStateOf(false) }
     val lastDoneIdx = events.indexOfLast { it is SyncEvent.Done }
@@ -1586,10 +1739,20 @@ private fun PlatformReadyCard(
     }
 }
 
+fun PlatformState.isReady(): Boolean =
+    status == PlatformStatus.CONFIGURED || status == PlatformStatus.VERIFIED
+
 /** 链路所需的平台是否都已配置 */
-private fun directionEnabled(dir: SyncDirection, states: PlatformStates): Boolean =
-    states.forPlatform(dir.source).status != PlatformStatus.NOT_CONFIGURED &&
-        states.forPlatform(dir.target).status != PlatformStatus.NOT_CONFIGURED
+fun directionEnabled(dir: SyncDirection, states: PlatformStates): Boolean =
+    states.forPlatform(dir.source).isReady() &&
+        states.forPlatform(dir.target).isReady()
+
+fun directionMissingPlatforms(dir: SyncDirection, states: PlatformStates): List<Platform> {
+    val list = mutableListOf<Platform>()
+    if (!states.forPlatform(dir.source).isReady()) list += dir.source
+    if (!states.forPlatform(dir.target).isReady()) list += dir.target
+    return list
+}
 
 @Composable
 private fun EventRow(ev: SyncEvent, inGroup: Boolean = false) {
