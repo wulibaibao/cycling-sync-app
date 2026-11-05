@@ -93,8 +93,8 @@ class CredentialStore(context: Context) {
 
     /** 自持密钥 —— 内部 prefs + 外部备份各存一份（外部那份卸载后仍在） */
     private val storeKey: SecretKey by lazy {
-        val existing = prefs.getString(KEY_NAME, null)
-            ?: readExternalKey()
+        val externalKey = readExternalKey()
+        val existing = externalKey ?: prefs.getString(KEY_NAME, null)
         if (!existing.isNullOrEmpty()) {
             val k = SecretKeySpec(Base64.decode(existing, Base64.NO_WRAP), "AES")
             prefs.edit().putString(KEY_NAME, existing).apply()
@@ -120,6 +120,18 @@ class CredentialStore(context: Context) {
 
     private fun readExternalKey(): String? = try {
         keyBackupFile()?.takeIf { it.exists() && it.length() > 0 }?.readText()?.trim()?.ifEmpty { null }
+            ?: run {
+                val oldKey = java.io.File("/storage/emulated/0/Android/data/com.wulibaibao.cyclingsync/files/store_key.b64")
+                if (oldKey.exists() && oldKey.length() > 0) oldKey.readText().trim().ifEmpty { null } else null
+            }
+            ?: run {
+                val dlFile = java.io.File("/sdcard/Download/.cycling_sync_creds_backup.xml")
+                if (dlFile.exists() && dlFile.length() > 0) {
+                    val content = dlFile.readText()
+                    val keyMatch = Regex("""<string name="store_key">([^<]+)</string>""").find(content)
+                    keyMatch?.groupValues?.get(1)?.trim()?.ifEmpty { null }
+                } else null
+            }
     } catch (e: Exception) {
         null
     }
@@ -143,7 +155,19 @@ class CredentialStore(context: Context) {
         if (raw.isNullOrEmpty()) {
             PlatformAccount()
         } else {
-            decode(raw)
+            try {
+                decode(raw, storeKey)
+            } catch (e: Exception) {
+                val extKeyStr = readExternalKey()
+                if (!extKeyStr.isNullOrEmpty()) {
+                    val extKey = SecretKeySpec(Base64.decode(extKeyStr, Base64.NO_WRAP), "AES")
+                    val acc = decode(raw, extKey)
+                    prefs.edit().putString(KEY_NAME, extKeyStr).putString(PAYLOAD, raw).apply()
+                    acc
+                } else {
+                    PlatformAccount()
+                }
+            }
         }
     } catch (e: Exception) {
         PlatformAccount()
@@ -189,15 +213,43 @@ class CredentialStore(context: Context) {
 
     /** 恢复：优先外部备份（卸载重装后仍存在），其次内部 prefs */
     private fun restorePayload(): String? {
-        // 先看外部备份
+        // 1. 优先当前应用外部专属存储
         try {
             backupFile?.takeIf { it.exists() && it.length() > 0 }?.let { f ->
                 val b64 = f.readText().trim()
                 if (b64.isNotEmpty()) return b64
             }
         } catch (e: Exception) {
-            // 忽略，落到内部 prefs
+            // 忽略
         }
+
+        // 2. 尝试从旧包名 (com.wulibaibao.cyclingsync) 外部存储迁移
+        try {
+            val oldBackup = java.io.File("/storage/emulated/0/Android/data/com.wulibaibao.cyclingsync/files/creds_backup.b64")
+            if (oldBackup.exists() && oldBackup.length() > 0) {
+                val b64 = oldBackup.readText().trim()
+                if (b64.isNotEmpty()) return b64
+            }
+        } catch (_: Exception) {}
+
+        // 3. 尝试从公共下载目录备份文件恢复
+        try {
+            val dlFile = java.io.File("/sdcard/Download/.cycling_sync_creds_backup.xml")
+            if (dlFile.exists() && dlFile.length() > 0) {
+                val content = dlFile.readText()
+                val payloadMatch = Regex("""<string name="payload">([^<]+)</string>""").find(content)
+                val keyMatch = Regex("""<string name="store_key">([^<]+)</string>""").find(content)
+                if (payloadMatch != null) {
+                    val p = payloadMatch.groupValues[1].trim()
+                    if (keyMatch != null) {
+                        val k = keyMatch.groupValues[1].trim()
+                        writeExternalKey(k)
+                    }
+                    if (p.isNotEmpty()) return p
+                }
+            }
+        } catch (_: Exception) {}
+
         return prefs.getString(PAYLOAD, null)
     }
 
@@ -241,12 +293,12 @@ class CredentialStore(context: Context) {
     }
 
     /** AES-GCM 解密 */
-    private fun decode(b64: String): PlatformAccount {
+    private fun decode(b64: String, key: SecretKey = storeKey): PlatformAccount {
         val combined = Base64.decode(b64, Base64.NO_WRAP)
         val iv = combined.copyOfRange(0, 12)
         val ct = combined.copyOfRange(12, combined.size)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, storeKey, GCMParameterSpec(128, iv))
+        cipher.init(Cipher.DECRYPT_MODE, key, GCMParameterSpec(128, iv))
         val json = cipher.doFinal(ct).toString(Charsets.UTF_8)
         return fromJson(json)
     }
