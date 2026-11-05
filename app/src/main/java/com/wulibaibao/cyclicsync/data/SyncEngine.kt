@@ -336,7 +336,7 @@ class SyncEngine(
     suspend fun fetchActivities(
         source: com.wulibaibao.cyclicsync.ui.Platform,
         page: Int = 1,
-        pageSize: Int = 50,
+        pageSize: Int = 20,
     ): Result<List<UnifiedActivity>> {
         val err = loginAll(required = setOf(source))
         if (err != null) return Result.failure(Exception(err))
@@ -475,12 +475,12 @@ class SyncEngine(
         }
     }
 
-    /** 全部历史分批流式加载：按页迭代，页间保护性延时 100ms */
+    /** 全部历史分批流式加载：按页迭代，页间保护性延时 50ms */
     fun streamAllActivities(
         source: com.wulibaibao.cyclicsync.ui.Platform,
         maxPages: Int = 100,
-        pageSize: Int = 50,
-        delayPerBatchMs: Long = 100L,
+        pageSize: Int = 20,
+        delayPerBatchMs: Long = 50L,
     ): Flow<List<UnifiedActivity>> = flow {
         for (p in 1..maxPages) {
             val res = fetchActivities(source, page = p, pageSize = pageSize)

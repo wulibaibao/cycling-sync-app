@@ -227,17 +227,17 @@ class MainActivity : ComponentActivity() {
 
                         var batchFull = false
                         if (shouldFetchIgp && account.igpConfigured) {
-                            engine.fetchActivities(Platform.IGP, page = 1, pageSize = 50)
+                            engine.fetchActivities(Platform.IGP, page = 1, pageSize = 20)
                                 .onSuccess {
                                     list += it
-                                    if (it.size >= 50) batchFull = true
+                                    if (it.size >= 20) batchFull = true
                                 }
                         }
                         if (shouldFetchOnelap && account.onelapConfigured) {
-                            engine.fetchActivities(Platform.ONELAP, page = 1, pageSize = 50)
+                            engine.fetchActivities(Platform.ONELAP, page = 1, pageSize = 20)
                                 .onSuccess {
                                     list += it
-                                    if (it.size >= 50) batchFull = true
+                                    if (it.size >= 20) batchFull = true
                                 }
                         }
                         list.sortByDescending { it.startTimeMs }
@@ -265,17 +265,17 @@ class MainActivity : ComponentActivity() {
                         var batchFull = false
 
                         if (shouldFetchIgp && account.igpConfigured) {
-                            engine.fetchActivities(Platform.IGP, page = nextPage, pageSize = 50)
+                            engine.fetchActivities(Platform.IGP, page = nextPage, pageSize = 20)
                                 .onSuccess {
                                     newItems += it
-                                    if (it.size >= 50) batchFull = true
+                                    if (it.size >= 20) batchFull = true
                                 }
                         }
                         if (shouldFetchOnelap && account.onelapConfigured) {
-                            engine.fetchActivities(Platform.ONELAP, page = nextPage, pageSize = 50)
+                            engine.fetchActivities(Platform.ONELAP, page = nextPage, pageSize = 20)
                                 .onSuccess {
                                     newItems += it
-                                    if (it.size >= 50) batchFull = true
+                                    if (it.size >= 20) batchFull = true
                                 }
                         }
 
@@ -303,7 +303,7 @@ class MainActivity : ComponentActivity() {
                             else -> listOf(Platform.ONELAP)
                         }
                         for (s in sourcesToStream) {
-                            engine.streamAllActivities(s, maxPages = 100, pageSize = 50, delayPerBatchMs = 100L).collect { batch ->
+                            engine.streamAllActivities(s, maxPages = 100, pageSize = 20, delayPerBatchMs = 50L).collect { batch ->
                                 activities = (activities + batch).distinctBy { it.id }.sortedByDescending { it.startTimeMs }
                                 selectedIds = activities
                                     .filter { isActPending(it) }
