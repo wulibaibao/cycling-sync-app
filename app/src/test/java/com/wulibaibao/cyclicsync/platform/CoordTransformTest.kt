@@ -271,4 +271,52 @@ class CoordTransformTest {
         // 北京的 GCJ 偏移约 550m
         assertTrue("位移应在 400-700m，实际 ${r.movedMeters}", r.movedMeters > 400.0 && r.movedMeters < 700.0)
     }
+
+    // ---------- 虚拟骑行不转坐标 ----------
+
+    @Test
+    fun `isVirtualActivity 能识别虚拟骑行`() {
+        for ((name, bytes) in listOf("顽鹿" to onelapSample, "IGPSPORT" to igpSample)) {
+            assertTrue("$name 应被识别为虚拟骑行", FitCoordRewriter.isVirtualActivity(bytes))
+        }
+    }
+
+    @Test
+    fun `isVirtualActivity 不修改 FIT 字节`() {
+        val before = onelapSample.copyOf()
+        FitCoordRewriter.isVirtualActivity(onelapSample)
+        assertTrue("探测不应改动任何字节", before.contentEquals(onelapSample))
+    }
+
+    @Test
+    fun `虚拟骑行 关掉坐标转换后字节不变 只改 sub_sport`() {
+        // 用户要求：「顽鹿遇到虚拟骑行不必转格式」
+        // —— 坐标不动，只把 sub_sport 58 改成 0（否则行者显示「虚拟骑行」）。
+        val r = FitCoordRewriter.prepareForXingzhe(
+            fit = onelapSample,
+            fixSubSport = true,
+            convertCoords = false,
+        )!!
+        assertEquals("虚拟骑行不该转换任何坐标", 0, r.pointsChanged)
+        assertEquals("位移必须是 0", 0.0, r.movedMeters, 0.0001)
+        assertTrue("但 sub_sport 仍应被改", r.virtualActivityFixed)
+    }
+
+    @Test
+    fun `虚拟骑行 两个开关都关 等于原样`() {
+        val r = FitCoordRewriter.prepareForXingzhe(
+            fit = onelapSample,
+            fixSubSport = false,
+            convertCoords = false,
+        )!!
+        assertEquals(0, r.pointsChanged)
+        assertTrue("不该改 sub_sport", !r.virtualActivityFixed)
+        assertTrue("字节应完全不变", onelapSample.contentEquals(r.bytes))
+    }
+
+    @Test
+    fun `非 FIT 文件不是虚拟骑行`() {
+        assertTrue(!FitCoordRewriter.isVirtualActivity(byteArrayOf(1, 2, 3, 4, 5)))
+        assertTrue(!FitCoordRewriter.isVirtualActivity(ByteArray(0)))
+    }
 }

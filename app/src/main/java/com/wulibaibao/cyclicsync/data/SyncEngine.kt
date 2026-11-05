@@ -405,10 +405,16 @@ class SyncEngine(
      * 探不出来时按「转」处理 —— 行者是四条链路里唯一确定要 WGS-84 的目标。
      */
     private fun adaptCoordsToXingzhe(fit: ByteArray, isWgsSource: Boolean): ByteArray {
+        // ★ 虚拟骑行**不做坐标转换**（用户要求：「顽鹿遇到虚拟骑行不必转格式」）。
+        //   虚拟骑行的轨迹是 trainer 在室内录的，本来就不是真实 GPS 路径 ——
+        //   转了只是让这条虚构的轨迹平移几百米，没有任何意义。
+        //   但 sub_sport 58 → 0 仍然要改（否则行者显示「虚拟骑行」而不是「骑行」），
+        //   这跟坐标无关。
+        val isVirtual = FitCoordRewriter.isVirtualActivity(fit)
         val r = FitCoordRewriter.prepareForXingzhe(
             fit = fit,
             fixSubSport = true,
-            convertCoords = isWgsSource.not(),
+            convertCoords = isWgsSource.not() && !isVirtual,
             targetIsGcj = false,
         ) ?: return fit
         if (r.pointsChanged == 0 && !r.virtualActivityFixed) return fit
@@ -596,10 +602,14 @@ class SyncEngine(
         //
         // ★ sub_sport **不改**：IGPSPORT 的 exerciseType 实测几乎全是 0，
         //   不像行者那样区分「虚拟骑行」，改 sub_sport 没有意义。
+        // ★ 虚拟骑行**不做坐标转换**（用户要求：「顽鹿遇到虚拟骑行不必转格式」）。
+        //   trainer 在室内录的轨迹不是真实 GPS 路径，转了只是平移几百米。
+        //   IGPSPORT 链路本来就不改 sub_sport，所以虚拟骑行这里等于原样上传。
+        val isVirtual = FitCoordRewriter.isVirtualActivity(fit)
         val rewritten = FitCoordRewriter.prepareForXingzhe(
             fit = fit,
             fixSubSport = false,
-            convertCoords = true,
+            convertCoords = !isVirtual,
         )
         val fitForUpload = rewritten?.bytes ?: fit
 

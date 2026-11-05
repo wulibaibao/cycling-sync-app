@@ -83,6 +83,31 @@ object FitCoordRewriter {
             (bytes.contentHashCode() * 31 + pointsChanged) * 31 + movedMeters.hashCode()
     }
 
+    /**
+     * 这个 FIT 是不是**虚拟骑行**（trainer / 室内）。
+     *
+     * 判据：session 或 lap 消息里的 `sub_sport == 58 (virtual_activity)`。
+     *
+     * 为什么要单独判断：虚拟骑行的轨迹是 trainer 在室内录的，
+     * **本来就不是真实 GPS 路径** —— 做 GCJ-02 ↔ WGS-84 转换只会让
+     * 这条虚构的轨迹平移几百米，没有任何意义（用户要求：
+     * 「顽鹿遇到虚拟骑行不必转格式」）。
+     *
+     * 只读不写 —— 不改 FIT 里的任何字节。
+     */
+    fun isVirtualActivity(fit: ByteArray): Boolean {
+        if (fit.size < HEADER_SIZE + 2) return false
+        if (fit[8] != '.'.code.toByte() || fit[9] != 'F'.code.toByte() ||
+            fit[10] != 'I'.code.toByte() || fit[11] != 'T'.code.toByte()
+        ) return false
+        val positions = findPositions(fit) ?: return false
+        for (off in positions.subSports) {
+            if (off < 0 || off >= fit.size) continue
+            if ((fit[off].toInt() and 0xFF) == SUB_SPORT_VIRTUAL_ACTIVITY) return true
+        }
+        return false
+    }
+
     private class FieldDef(val defNum: Int, val size: Int, val baseType: Int)
 
     /** 扫描出来的字段位置。 */
