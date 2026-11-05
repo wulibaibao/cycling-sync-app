@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -47,6 +48,8 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -65,7 +68,7 @@ enum class StatusFilterOption(val label: String) {
     UNSYNCED("⚡ 仅看待同步"),
     WEEK("近 7 天"),
     MONTH("近 30 天"),
-    ALL("全部历史(分批)"),
+    ALL("全部历史"),
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -77,6 +80,8 @@ fun ActivityLedgerScreen(
     batchCurrent: Int,
     batchTotal: Int,
     loading: Boolean,
+    loadingMore: Boolean = false,
+    hasMore: Boolean = false,
     activities: List<UnifiedActivity>,
     selectedIds: Set<String>,
     onToggleSelect: (String) -> Unit,
@@ -85,6 +90,7 @@ fun ActivityLedgerScreen(
     onBatchSync: (Platform) -> Unit,
     onSingleSync: (UnifiedActivity, Platform) -> Unit,
     onRefresh: () -> Unit,
+    onLoadMore: () -> Unit = {},
     onLoadAllHistory: () -> Unit,
     onStop: () -> Unit,
     onOpenLogs: () -> Unit,
@@ -112,6 +118,20 @@ fun ActivityLedgerScreen(
         }
     }
     val pendingCount = activities.count { isActPending(it) }
+
+    val listState = rememberLazyListState()
+    val shouldLoadMore by remember {
+        derivedStateOf {
+            val total = listState.layoutInfo.totalItemsCount
+            val lastVisible = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: 0
+            hasMore && !loadingMore && !loading && total > 0 && lastVisible >= total - 2
+        }
+    }
+    LaunchedEffect(shouldLoadMore) {
+        if (shouldLoadMore) {
+            onLoadMore()
+        }
+    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -283,7 +303,7 @@ fun ActivityLedgerScreen(
                         statusFilter = StatusFilterOption.ALL
                         onLoadAllHistory()
                     },
-                    label = { Text("全部历史(分批)") },
+                    label = { Text("全部历史") },
                 )
             }
 
@@ -335,6 +355,7 @@ fun ActivityLedgerScreen(
 
             // 活动卡片列表
             LazyColumn(
+                state = listState,
                 modifier = Modifier
                     .weight(1f)
                     .fillMaxWidth(),
@@ -421,6 +442,69 @@ fun ActivityLedgerScreen(
                             onToggle = { onToggleSelect(act.id) },
                             onSingleSync = { target -> onSingleSync(act, target) },
                         )
+                    }
+
+                    item(key = "footer_load_more") {
+                        if (loadingMore) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 16.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                                    Spacer(Modifier.width(10.dp))
+                                    Text(
+                                        "正在加载更早的历史记录...",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        } else if (hasMore) {
+                            Surface(
+                                onClick = onLoadMore,
+                                shape = RoundedCornerShape(12.dp),
+                                color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 8.dp),
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(14.dp),
+                                    horizontalArrangement = Arrangement.Center,
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.Refresh,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Text(
+                                        "加载更早的历史记录 (当前已展示 ${filtered.size} 条) ›",
+                                        style = MaterialTheme.typography.labelMedium,
+                                        fontWeight = FontWeight.SemiBold,
+                                        color = MaterialTheme.colorScheme.primary,
+                                    )
+                                }
+                            }
+                        } else if (!hasMore && activities.isNotEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 16.dp),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                Text(
+                                    "已加载全部历史记录（共 ${activities.size} 条）",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.outline,
+                                )
+                            }
+                        }
                     }
                 }
             }

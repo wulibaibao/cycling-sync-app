@@ -199,6 +199,9 @@ class MainActivity : ComponentActivity() {
                 var activities by remember { mutableStateOf<List<UnifiedActivity>>(emptyList()) }
                 var selectedIds by remember { mutableStateOf<Set<String>>(emptySet()) }
                 var loadingActivities by remember { mutableStateOf(false) }
+                var loadingMore by remember { mutableStateOf(false) }
+                var hasMore by remember { mutableStateOf(true) }
+                var currentPage by remember { mutableStateOf(1) }
                 var batchProgressText by remember { mutableStateOf("") }
                 var batchCurrent by remember { mutableStateOf(0) }
                 var batchTotal by remember { mutableStateOf(0) }
@@ -213,6 +216,8 @@ class MainActivity : ComponentActivity() {
 
                 fun refreshActivities(source: Platform? = null) {
                     loadingActivities = true
+                    currentPage = 1
+                    hasMore = true
                     lifecycleScope.launch {
                         val engine = SyncEngine(account, this@MainActivity)
                         val list = mutableListOf<UnifiedActivity>()
@@ -220,21 +225,69 @@ class MainActivity : ComponentActivity() {
                         val shouldFetchIgp = (source == null || source == Platform.IGP) && (activeSources.isEmpty() || Platform.IGP in activeSources)
                         val shouldFetchOnelap = (source == null || source == Platform.ONELAP) && (activeSources.isEmpty() || Platform.ONELAP in activeSources)
 
+                        var batchFull = false
                         if (shouldFetchIgp && account.igpConfigured) {
-                            engine.fetchActivities(Platform.IGP, page = 1, pageSize = 20)
-                                .onSuccess { list += it }
+                            engine.fetchActivities(Platform.IGP, page = 1, pageSize = 50)
+                                .onSuccess {
+                                    list += it
+                                    if (it.size >= 50) batchFull = true
+                                }
                         }
                         if (shouldFetchOnelap && account.onelapConfigured) {
-                            engine.fetchActivities(Platform.ONELAP, page = 1, pageSize = 20)
-                                .onSuccess { list += it }
+                            engine.fetchActivities(Platform.ONELAP, page = 1, pageSize = 50)
+                                .onSuccess {
+                                    list += it
+                                    if (it.size >= 50) batchFull = true
+                                }
                         }
                         list.sortByDescending { it.startTimeMs }
                         activities = list
+                        hasMore = batchFull
                         selectedIds = list
                             .filter { isActPending(it) }
                             .map { it.id }
                             .toSet()
                         loadingActivities = false
+                    }
+                }
+
+                fun loadMoreActivities(source: Platform? = null) {
+                    if (loadingActivities || loadingMore || !hasMore) return
+                    loadingMore = true
+                    lifecycleScope.launch {
+                        val engine = SyncEngine(account, this@MainActivity)
+                        val activeSources = selected.filter { directionEnabled(it, states) }.map { it.source }.toSet()
+                        val shouldFetchIgp = (source == null || source == Platform.IGP) && (activeSources.isEmpty() || Platform.IGP in activeSources)
+                        val shouldFetchOnelap = (source == null || source == Platform.ONELAP) && (activeSources.isEmpty() || Platform.ONELAP in activeSources)
+
+                        val nextPage = currentPage + 1
+                        val newItems = mutableListOf<UnifiedActivity>()
+                        var batchFull = false
+
+                        if (shouldFetchIgp && account.igpConfigured) {
+                            engine.fetchActivities(Platform.IGP, page = nextPage, pageSize = 50)
+                                .onSuccess {
+                                    newItems += it
+                                    if (it.size >= 50) batchFull = true
+                                }
+                        }
+                        if (shouldFetchOnelap && account.onelapConfigured) {
+                            engine.fetchActivities(Platform.ONELAP, page = nextPage, pageSize = 50)
+                                .onSuccess {
+                                    newItems += it
+                                    if (it.size >= 50) batchFull = true
+                                }
+                        }
+
+                        if (newItems.isNotEmpty()) {
+                            val combined = (activities + newItems).distinctBy { it.id }.sortedByDescending { it.startTimeMs }
+                            activities = combined
+                            currentPage = nextPage
+                            val newPendingIds = newItems.filter { isActPending(it) }.map { it.id }
+                            selectedIds = selectedIds + newPendingIds
+                        }
+                        hasMore = batchFull
+                        loadingMore = false
                     }
                 }
 
@@ -250,7 +303,7 @@ class MainActivity : ComponentActivity() {
                             else -> listOf(Platform.ONELAP)
                         }
                         for (s in sourcesToStream) {
-                            engine.streamAllActivities(s, maxPages = 10, delayPerBatchMs = 250L).collect { batch ->
+                            engine.streamAllActivities(s, maxPages = 100, pageSize = 50, delayPerBatchMs = 100L).collect { batch ->
                                 activities = (activities + batch).distinctBy { it.id }.sortedByDescending { it.startTimeMs }
                                 selectedIds = activities
                                     .filter { isActPending(it) }
@@ -258,6 +311,7 @@ class MainActivity : ComponentActivity() {
                                     .toSet()
                             }
                         }
+                        hasMore = false
                         loadingActivities = false
                     }
                 }
@@ -563,6 +617,8 @@ class MainActivity : ComponentActivity() {
                                 batchCurrent = batchCurrent,
                                 batchTotal = batchTotal,
                                 loading = loadingActivities,
+                                loadingMore = loadingMore,
+                                hasMore = hasMore,
                                 activities = activities,
                                 selectedIds = selectedIds,
                                 onToggleSelect = { id ->
@@ -578,6 +634,7 @@ class MainActivity : ComponentActivity() {
                                 onBatchSync = { target -> startBatchSync(target) },
                                 onSingleSync = { act, target -> startSingleSync(act, target) },
                                 onRefresh = { refreshActivities() },
+                                onLoadMore = { loadMoreActivities() },
                                 onLoadAllHistory = { loadAllHistory() },
                                 onStop = {
                                     job?.cancel()

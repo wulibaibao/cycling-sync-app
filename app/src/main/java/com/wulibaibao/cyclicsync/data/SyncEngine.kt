@@ -336,7 +336,7 @@ class SyncEngine(
     suspend fun fetchActivities(
         source: com.wulibaibao.cyclicsync.ui.Platform,
         page: Int = 1,
-        pageSize: Int = 20,
+        pageSize: Int = 50,
     ): Result<List<UnifiedActivity>> {
         val err = loginAll(required = setOf(source))
         if (err != null) return Result.failure(Exception(err))
@@ -475,20 +475,21 @@ class SyncEngine(
         }
     }
 
-    /** 全部历史分批流式加载：按页迭代，页间保护性延时 250ms */
+    /** 全部历史分批流式加载：按页迭代，页间保护性延时 100ms */
     fun streamAllActivities(
         source: com.wulibaibao.cyclicsync.ui.Platform,
-        maxPages: Int = 10,
-        delayPerBatchMs: Long = 250L,
+        maxPages: Int = 100,
+        pageSize: Int = 50,
+        delayPerBatchMs: Long = 100L,
     ): Flow<List<UnifiedActivity>> = flow {
         for (p in 1..maxPages) {
-            val res = fetchActivities(source, page = p, pageSize = 20)
+            val res = fetchActivities(source, page = p, pageSize = pageSize)
             if (res.isFailure) break
             val list = res.getOrThrow()
             if (list.isEmpty()) break
             emit(list)
-            if (list.size < 20) break
-            kotlinx.coroutines.delay(delayPerBatchMs)
+            if (list.size < pageSize) break
+            if (delayPerBatchMs > 0) kotlinx.coroutines.delay(delayPerBatchMs)
         }
     }
 
@@ -660,7 +661,7 @@ class SyncEngine(
     private suspend fun fetchXingzheExisting(): DedupIndex {
         val idx = DedupIndex()
         var offset = 0
-        while (offset < 200) {
+        while (offset < 2000) {
             val batchRes = xingzhe.listPrivateWorkouts(offset = offset, limit = 50)
             if (batchRes.isFailure) break
             val batch = batchRes.getOrThrow()
@@ -708,14 +709,21 @@ class SyncEngine(
 
     private suspend fun fetchIgpExisting(): DedupIndex {
         val idx = DedupIndex()
-        igp.listActivities(pageSize = 100).getOrNull()?.forEach { a ->
-            idx.addAux(a.rideId)
-            idx.addAux(a.name)
-            val startMs = DedupIndex.parseTime(a.startTime)
-            if (startMs != null) {
-                idx.add(startMs, a.distanceM)
-                idx.addDateDist(formatDate(a.startTime), a.distanceM)
+        var page = 1
+        while (page <= 20) {
+            val list = igp.listActivities(pageNo = page, pageSize = 100).getOrNull() ?: break
+            if (list.isEmpty()) break
+            list.forEach { a ->
+                idx.addAux(a.rideId)
+                idx.addAux(a.name)
+                val startMs = DedupIndex.parseTime(a.startTime)
+                if (startMs != null) {
+                    idx.add(startMs, a.distanceM)
+                    idx.addDateDist(formatDate(a.startTime), a.distanceM)
+                }
             }
+            if (list.size < 100) break
+            page++
         }
         return idx
     }
@@ -737,7 +745,7 @@ class SyncEngine(
                     idx.addDateDist(formatDate(r.startTime), r.distanceKm * 1000.0)
                 }
             }
-            if (batch.size < 20) break
+            if (batch.size < ONELAP_PAGE_SIZE) break
             page++
         }
         return idx
