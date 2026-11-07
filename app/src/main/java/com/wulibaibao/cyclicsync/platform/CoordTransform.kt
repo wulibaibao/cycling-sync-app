@@ -9,14 +9,14 @@ import kotlin.math.sqrt
 /**
  * GCJ-02（火星坐标系）↔ WGS-84 转换。
  *
- * 平台坐标系约定（实测得出）：
+ * 平台坐标系约定：
  *  - 顽鹿 / 迈金 存的 FIT 坐标是 **GCJ-02**
- *  - 行者（imxingzhe.com）底图按 **WGS-84** 显示 ⇒ 传行者要转成 WGS-84
- *  - **IGPSPORT 收 WGS-84**（2026-11-03 拆它网页版 bundle 实测：底图是高德=GCJ-02，
- *    但轨迹数据字段名 `wgs84TrackJsonPath` ⇒ 服务端统一存 WGS-84）⇒ 传 IGPSPORT 也要转
- *  - 顽鹿 底图按 GCJ-02 ⇒ 传顽鹿要 GCJ-02
+ *  - **传行者不转坐标**（2026-11-07 用户裁定）—— 坐标原样传，
+ *    只把 `sub_sport` 58→0（否则行者显示「虚拟骑行」）
+ *  - **IGPSPORT 收 WGS-84** ⇒ 传 IGPSPORT 要转（顽鹿 → IGPSPORT 那条链路）
+ *  - 顽鹿 底图按 GCJ-02 ⇒ IGPSPORT → 顽鹿 要按来源判定
  *
- * 所以 **IGPSPORT 里存量活动的坐标系是混杂的**（迈金/顽鹿原生 = GCJ-02，
+ * IGPSPORT 里存量活动的坐标系**是混杂的**（迈金/顽鹿原生 = GCJ-02，
  * Strava 官方同步 = WGS-84，v1.2.3 起我们上传的 = WGS-84）——
  * 下载 IGPSPORT 的 FIT 时要**按来源判定**（看 title），不能想当然。
  *

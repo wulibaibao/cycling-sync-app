@@ -2,6 +2,8 @@ package com.wulibaibao.cyclicsync.data
 
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertEquals
 import org.junit.Test
 import java.time.LocalDate
 
@@ -211,5 +213,29 @@ class SyncEngineDateTest {
         // 空索引 = 服务端什么都没有 ⇒ 应该上传（而不是被本地历史拦下）
         val idx = DedupIndex()
         assertFalse(idx.matchesFingerprint(1780000000000L, 144840.0))
+    }
+
+    // ---------- 传行者不转坐标（2026-11-07 用户要求）----------
+
+    /**
+     * 用户要求：「igps 传行者不需要转坐标系」。
+     *
+     * 传行者时坐标必须**原样**（不转 GCJ-02↔WGS-84），
+     * 只改 sub_sport（58→0，否则行者显示「虚拟骑行」）。
+     */
+    @Test
+    fun `传行者时坐标不转换`() {
+        // 用真实的测试样本走一遍
+        val sample = javaClass.classLoader!!.getResourceAsStream("synth_onelap_virtual.fit")
+        assertNotNull("测试样本缺失", sample)
+        val bytes = sample.readBytes()
+        val r = com.wulibaibao.cyclicsync.platform.FitCoordRewriter.prepareForXingzhe(
+            fit = bytes,
+            fixSubSport = true,
+            convertCoords = false,
+        )!!
+        assertEquals("不应转换任何坐标", 0, r.pointsChanged)
+        assertEquals("位移必须为 0", 0.0, r.movedMeters, 0.0001)
+        assertTrue("sub_sport 仍应改成 generic", r.virtualActivityFixed)
     }
 }

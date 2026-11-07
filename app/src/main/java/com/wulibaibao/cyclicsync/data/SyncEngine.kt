@@ -404,17 +404,22 @@ class SyncEngine(
      *
      * 探不出来时按「转」处理 —— 行者是四条链路里唯一确定要 WGS-84 的目标。
      */
-    private fun adaptCoordsToXingzhe(fit: ByteArray, isWgsSource: Boolean): ByteArray {
-        // ★ 虚拟骑行**不做坐标转换**（用户要求：「顽鹿遇到虚拟骑行不必转格式」）。
-        //   虚拟骑行的轨迹是 trainer 在室内录的，本来就不是真实 GPS 路径 ——
-        //   转了只是让这条虚构的轨迹平移几百米，没有任何意义。
-        //   但 sub_sport 58 → 0 仍然要改（否则行者显示「虚拟骑行」而不是「骑行」），
-        //   这跟坐标无关。
-        val isVirtual = FitCoordRewriter.isVirtualActivity(fit)
+    /**
+     * 适配成行者要的 FIT —— **只改 sub_sport，不动坐标**。
+     *
+     * 坐标一律原样传（用户要求：「igps 传行者不需要转坐标系」）。
+     *
+     * ⚠️ 仍然要改 `sub_sport`：58 (virtual_activity) → 0 (generic)，
+     *    不然行者会把它显示成「虚拟骑行」而不是「骑行」。
+     *    这跟坐标系无关，是活动类型。
+     *
+     * @param isWgsSource 已废弃 —— 坐标不再转换，这个参数没有意义了。
+     */
+    private fun adaptCoordsToXingzhe(fit: ByteArray, @Suppress("UNUSED_PARAMETER") isWgsSource: Boolean = false): ByteArray {
         val r = FitCoordRewriter.prepareForXingzhe(
             fit = fit,
             fixSubSport = true,
-            convertCoords = isWgsSource.not() && !isVirtual,
+            convertCoords = false,
             targetIsGcj = false,
         ) ?: return fit
         if (r.pointsChanged == 0 && !r.virtualActivityFixed) return fit
@@ -424,23 +429,15 @@ class SyncEngine(
     /**
      * 坐标系适配 —— 把 FIT 里的 GCJ-02 坐标转成行者用的 WGS-84。
      *
-     * 实测结论（2026-11-01 行者侧；2026-11-03 修正 IGPSPORT 侧）：
-     * | 源 FIT 坐标 | 目标平台 | 需要转换 |
-     * |---|---|---|
-     * | 顽鹿 / 迈金 = GCJ-02 | 行者（WGS-84 底图） | ✅ gcj2wgs |
-     * | 顽鹿 / 迈金 = GCJ-02 | IGPSPORT（**收 WGS-84**） | ✅ gcj2wgs |
-     * | IGPSPORT 下载的 FIT | 行者（WGS-84 底图） | ✅ gcj2wgs |
-     * | IGPSPORT 下载的 FIT | 顽鹿（GCJ-02 底图） | ❌ 不转 |
+     * ⚠️ **2026-11-07 用户裁定：传行者不转坐标。**
      *
-     * ⚠️ **IGPSPORT 收 WGS-84**（2026-11-03 拆它网页版 bundle 实测）：
-     * 底图是高德（GCJ-02），但轨迹数据字段名叫 `wgs84TrackJsonPath` ——
-     * 服务端统一存 WGS-84，前端拿到后再转高德画图。
-     * 之前误判成「IGPSPORT 不用转」，只验了存储层（下载回来的 FIT 与源逐位相同）
-     * 没验显示层 —— **存储保真 ≠ 显示原样**。
+     * 之前这里按「行底图是 WGS-84」的推断做了 GCJ→WGS 转换，
+     * 但那个结论只有间接证据，没有真上传验证过。用户明确要求不转，
+     * 所以 `adaptCoordsToXingzhe` 里的 `convertCoords` 固定为 false。
      *
-     * 不转的话整条路线偏 400-500m（实测 459m），路线会跑到马路外的建筑区和绿地。
+     * 仍然保留的改动：`sub_sport` 58 → 0（否则行者显示「虚拟骑行」）。
      *
-     * 注意：**转换后 md5 会变**，所以 md5 判重必须在转换之后算。
+     * 注意：**转换会改 md5**，所以 md5 判重必须在转换之后算。
      */
 
     /**
@@ -535,12 +532,11 @@ class SyncEngine(
             return RideResult.Failed(date, ride.name, ride.distanceKm, "下载 FIT 失败: ${it.message}")
         }
         val fileName = "onelap_${ride.id}.fit"
-        // 坐标系适配：行者底图是 WGS-84 —— 需要 WGS-84 的 FIT（不转会偏 459m）。
-        // 顽鹿原生 FIT 是 GCJ-02，但用探测更保险（万一顽鹿里混了 WGS-84 的活动）。
-        // 同时把 session/lap 的 sub_sport 从 virtual_activity 改成 generic，
-        // 否则行者会显示成「虚拟骑行」而不是「骑行」。
-        // 顽鹿原生 FIT 是 GCJ-02，行者要 WGS-84 ⇒ 需要转
-        val fitOut = adaptCoordsToXingzhe(fit, isWgsSource = false)
+        // ★ 坐标**原样传，不转换**（用户要求：「igps 传行者不需要转坐标系」，
+        //   顽鹿 → 行者 同样不转）。
+        //   只把 session/lap 的 sub_sport 从 virtual_activity 改成 generic，
+        //   否则行者会显示成「虚拟骑行」而不是「骑行」。
+        val fitOut = adaptCoordsToXingzhe(fit)
         // md5 必须在转换之后算 —— 字节变了 md5 就变了
         val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fitOut)
         // 判重 3：md5 辅助键
@@ -715,16 +711,10 @@ class SyncEngine(
         val fit = igp.downloadFit(act.rideId).getOrElse {
             return RideResult.Failed(date, name, km, "下载 FIT 失败: ${it.message}")
         }
-        // 坐标系适配：行者底图是 WGS-84 ⇒ 需要 WGS-84 的 FIT。
-        //
-        // ⚠️ IGPSPORT 里存量活动的坐标系**是混杂的**（迈金/顽鹿原生 = GCJ-02，
-        //    Strava 官方同步 = WGS-84，v1.2.3 起我们上传的 = WGS-84），
-        //    所以要先探测：已经是 WGS-84 的别再转（否则转歪 459m）。
-        //
-        // 同时把 session/lap 的 sub_sport 从 virtual_activity 改成 generic，
-        // 否则行者会显示成「虚拟骑行」而不是「骑行」。
-        val isWgsSource = isWgs84IgpActivity(act.name)
-        val fitOut = adaptCoordsToXingzhe(fit, isWgsSource)
+        // ★ 坐标**原样传，不转换**（用户要求：「igps 传行者不需要转坐标系」）。
+        //   只把 session/lap 的 sub_sport 从 virtual_activity 改成 generic，
+        //   否则行者会显示成「虚拟骑行」而不是「骑行」。
+        val fitOut = adaptCoordsToXingzhe(fit)
         // md5 必须在转换之后算 —— 字节变了 md5 就变了
         val md5 = com.wulibaibao.cyclicsync.platform.Crypto.md5Bytes(fitOut)
         // 判重 3：md5 辅助键
