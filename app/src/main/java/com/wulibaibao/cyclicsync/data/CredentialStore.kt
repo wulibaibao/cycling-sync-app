@@ -29,6 +29,8 @@ data class PlatformAccount(
     val igpToken: String = "",
     val igpRefreshToken: String = "",
     val igpExpiresAt: Long = 0L,
+    /** refresh_token 的过期时间 —— IGPSPORT 的 refresh_token 只有 7 天有效期 */
+    val igpRefreshExpiresAt: Long = 0L,
     val xingzheAccount: String = "",
     val xingzhePassword: String = "",
     val xingzheSessionId: String = "",
@@ -188,6 +190,7 @@ class CredentialStore(context: Context) {
             put("igp_token", JsonPrimitive(account.igpToken))
             put("igp_refresh_token", JsonPrimitive(account.igpRefreshToken))
             put("igp_expires_at", JsonPrimitive(account.igpExpiresAt))
+        put("igp_refresh_expires_at", JsonPrimitive(account.igpRefreshExpiresAt))
             put("xz_account", JsonPrimitive(account.xingzheAccount))
             put("xz_password", JsonPrimitive(account.xingzhePassword))
             put("xz_session_id", JsonPrimitive(account.xingzheSessionId))
@@ -239,6 +242,7 @@ class CredentialStore(context: Context) {
             igpToken = s("igp_token"),
             igpRefreshToken = s("igp_refresh_token"),
             igpExpiresAt = s("igp_expires_at").toLongOrNull() ?: 0L,
+            igpRefreshExpiresAt = s("igp_refresh_expires_at").toLongOrNull() ?: 0L,
             xingzheAccount = s("xz_account"),
             xingzhePassword = s("xz_password"),
             xingzheSessionId = s("xz_session_id"),

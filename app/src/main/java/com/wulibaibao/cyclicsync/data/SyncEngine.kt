@@ -105,6 +105,7 @@ class SyncEngine(
             igp.token = account.igpToken
             igp.refreshToken = account.igpRefreshToken
             igp.expiresAt = account.igpExpiresAt
+            igp.refreshExpiresAt = account.igpRefreshExpiresAt
             igp.ensureToken()
                 .onSuccess { igpReady = true }
                 .onFailure { return "IGPSPORT 登录失败: ${it.message}" }

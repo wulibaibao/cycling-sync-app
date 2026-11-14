@@ -16,6 +16,8 @@ import java.net.URLEncoder
  */
 internal class IgpClient {
     companion object {
+        /** 提前刷新窗口：access_token 过期前 5 天就刷（refresh_token 只有 7 天有效） */
+        const val PROACTIVE_REFRESH_WINDOW = 5L * 24 * 3600
         const val PROD = "https://prod.zh.igpsport.com"
         const val APP = "https://app.zh.igpsport.com"
         const val BASE = "$PROD/service"
@@ -58,8 +60,34 @@ internal class IgpClient {
     var phone: String = ""
     var expiresAt: Long = 0L
 
+    /**
+     * refresh_token 的过期时间（秒）。
+     *
+     * ⚠️ IGPSPORT 的 refresh_token **也有 7 天有效期**（实测：11-03 存的 token
+     * 到 11-14 就 401 了，伪造的 rt 返回完全一样的 401 空体 ⇒ 已被服务端作废）。
+     *
+     * ★ 关键：**刷新必须在 access_token 仍有效时进行**（服务端要求）。
+     *   只在 access_token 过期后才刷新 ⇒ refresh_token 自己也过期了 ⇒ 401 死循环。
+     *   所以要在 access_token 过期**之前**主动刷新（提前 5 天）。
+     */
+    var refreshExpiresAt: Long = 0L
+
     fun hasValidToken(): Boolean =
         token.isNotEmpty() && (expiresAt == 0L || System.currentTimeMillis() / 1000 < expiresAt - 300)
+
+    /** refresh_token 还活着吗？ */
+    fun hasValidRefreshToken(): Boolean =
+        refreshToken.isNotEmpty() &&
+            (refreshExpiresAt == 0L || System.currentTimeMillis() / 1000 < refreshExpiresAt - 300)
+
+    /** access_token 快过期了（离过期点不到 5 天）→ 该提前刷新了 */
+    fun needsProactiveRefresh(): Boolean {
+        if (!hasValidRefreshToken()) return false
+        val now = System.currentTimeMillis() / 1000
+        if (expiresAt == 0L) return false
+        return now >= expiresAt - PROACTIVE_REFRESH_WINDOW
+    }
+
 
     /** Bearer 认证头 */
     private fun bearer(): Map<String, String> =
@@ -164,6 +192,8 @@ internal class IgpClient {
             ?: d["expiresIn"]?.jsonPrimitive?.content?.toLongOrNull()
             ?: 0L
         expiresAt = System.currentTimeMillis() / 1000 + expiresIn
+        // refresh_token 有效期与 access_token 相同（实测都是 7 天）
+        refreshExpiresAt = System.currentTimeMillis() / 1000 + expiresIn
         this.phone = phone
         return Result.success(Unit)
     }
@@ -210,6 +240,8 @@ internal class IgpClient {
         val expiresIn = d["expires_in"]?.jsonPrimitive?.content?.toLongOrNull()
             ?: d["expiresIn"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
         expiresAt = System.currentTimeMillis() / 1000 + expiresIn
+        // refresh_token 有效期与 access_token 相同（实测都是 7 天）
+        refreshExpiresAt = System.currentTimeMillis() / 1000 + expiresIn
         this.phone = username
         return Result.success(Unit)
     }
@@ -232,24 +264,44 @@ internal class IgpClient {
             url = REFRESH + "?refreshToken=$encoded",
             headers = authHeaders("GET", path, ""),
         )
-        if (!r.ok) return Result.failure(Exception("刷新失败 HTTP ${r.code}"))
+        if (!r.ok) {
+            // 401 = refresh_token 已失效（IGPSPORT 的 refresh_token 只有 7 天有效期，
+            // 必须在 access_token 过期前刷新，否则两边一起死）
+            if (r.code == 401) return Result.failure(Exception("登录已过期，请重新登录"))
+            return Result.failure(Exception("刷新失败 HTTP ${r.code}"))
+        }
         val obj = JsonAny.parseToJsonElement(r.body).jsonObject
         val d = obj["data"] as? JsonObject ?: return Result.failure(Exception("刷新无 data"))
         token = d["access_token"]?.jsonPrimitive?.content ?: d["accessToken"]?.jsonPrimitive?.content ?: token
         refreshToken = d["refresh_token"]?.jsonPrimitive?.content ?: d["refreshToken"]?.jsonPrimitive?.content ?: refreshToken
         val expiresIn = d["expires_in"]?.jsonPrimitive?.content?.toLongOrNull() ?: d["expiresIn"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L
         expiresAt = System.currentTimeMillis() / 1000 + expiresIn
+        // refresh_token 有效期与 access_token 相同（实测都是 7 天）
+        refreshExpiresAt = System.currentTimeMillis() / 1000 + expiresIn
         return Result.success(Unit)
     }
 
     /** 确保 token 可用（过期则刷新） */
     suspend fun ensureToken(): Result<Unit> {
+        // ★ 提前刷新：access_token 快过期时（refresh_token 还活着）就先刷。
+        //   服务端要求刷新时 access_token 仍有效 —— 只在过期后才刷会死锁：
+        //   access_token 过期 → refresh_token 也过期 → 401 → 只能重新登录。
+        if (needsProactiveRefresh()) {
+            val r = refresh()
+            if (r.isSuccess && hasValidToken()) return Result.success(Unit)
+            // 提前刷新失败就继续往下走（可能 token 其实还能用）
+        }
         if (hasValidToken()) return Result.success(Unit)
-        if (refreshToken.isEmpty()) return Result.failure(Exception("token 过期且无 refreshToken，请重新登录"))
+        if (refreshToken.isEmpty()) {
+            return Result.failure(Exception("登录已过期，请重新登录"))
+        }
         val r = refresh()
-        if (r.isFailure) return r
+        if (r.isFailure) {
+            // 401 = refresh_token 已被服务端作废（超过 7 天有效期），只能重新登录
+            return Result.failure(Exception("登录已过期，请重新登录"))
+        }
         return if (hasValidToken()) Result.success(Unit)
-        else Result.failure(Exception("刷新后 token 仍无效"))
+        else Result.failure(Exception("登录已过期，请重新登录"))
     }
 
     /** 拉活动列表（GET + query 参数，与 web-analyze 模块一致） */

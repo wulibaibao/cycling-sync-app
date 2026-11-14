@@ -120,6 +120,30 @@ class MainActivity : ComponentActivity() {
             // 从已保存的凭据恢复各平台登录态 —— 否则重装/重启后
             // 凭据还在但界面显示「未配置」，用户以为要重新配。
             states = restoreStates(loaded)
+            // ★ 启动时主动刷新 IGPSPORT token。
+            //   refresh_token 只有 7 天有效，而服务端要求**刷新时 access_token 仍有效**。
+            //   如果只在同步时才刷新，隔几天再开 App 两个 token 一起过期 ⇒ 401 死循环。
+            //   趁 refresh_token 还活着，先把它换成新的。
+            if (loaded.igpConfigured) {
+                lifecycleScope.launch {
+                    val c = IgpClient()
+                    c.token = loaded.igpToken
+                    c.refreshToken = loaded.igpRefreshToken
+                    c.expiresAt = loaded.igpExpiresAt
+                    c.refreshExpiresAt = loaded.igpRefreshExpiresAt
+                    if (c.needsProactiveRefresh()) {
+                        c.refresh().onSuccess {
+                            account = account.copy(
+                                igpToken = c.token,
+                                igpRefreshToken = c.refreshToken,
+                                igpExpiresAt = c.expiresAt,
+                                igpRefreshExpiresAt = c.refreshExpiresAt,
+                            )
+                            store.save(account)
+                        }
+                    }
+                }
+            }
         } catch (e: Exception) {
             android.util.Log.e("CyclingSync", "load creds failed", e)
         }
@@ -446,6 +470,7 @@ class MainActivity : ComponentActivity() {
         client.token = account.igpToken
         client.refreshToken = account.igpRefreshToken
         client.expiresAt = account.igpExpiresAt
+        client.refreshExpiresAt = account.igpRefreshExpiresAt
         val ens = client.ensureToken()
         if (ens.isFailure) {
             return PlatformState(
@@ -558,6 +583,7 @@ class MainActivity : ComponentActivity() {
                             igpToken = client.token,
                             igpRefreshToken = client.refreshToken,
                             igpExpiresAt = client.expiresAt,
+                            igpRefreshExpiresAt = client.refreshExpiresAt,
                         ),
                     )
                     Toast.makeText(this@MainActivity, "IGPSPORT 登录成功", Toast.LENGTH_SHORT).show()
@@ -695,6 +721,7 @@ class MainActivity : ComponentActivity() {
                 igpToken = "",
                 igpRefreshToken = "",
                 igpExpiresAt = 0L,
+                igpRefreshExpiresAt = 0L,
             )
             Platform.XINGZHE -> account.copy(
                 xingzheAccount = "",
@@ -741,6 +768,7 @@ class MainActivity : ComponentActivity() {
                             igpToken = client.token,
                             igpRefreshToken = client.refreshToken,
                             igpExpiresAt = client.expiresAt,
+                            igpRefreshExpiresAt = client.refreshExpiresAt,
                         ),
                     )
                     Toast.makeText(this@MainActivity, "IGPSPORT 登录成功", Toast.LENGTH_SHORT).show()
